@@ -368,6 +368,10 @@ if with_virtio_vk
   )
 endif
 
+if freedreno_kmds.contains('kgsl')
+  pre_args += '-DHAVE_FREEDRENO_KGSL'
+endif
+
 with_dri = false
 if with_gallium and (system_has_kms_drm or (with_gallium_zink and (freedreno_kmds.contains('kgsl') or host_machine.system() == 'darwin')))
   _glx = get_option('glx')
