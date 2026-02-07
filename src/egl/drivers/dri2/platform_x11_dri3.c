@@ -520,7 +520,7 @@ dri3_x11_connect(struct dri2_egl_display *dri2_dpy, bool swrast)
             _eglLog(_EGL_WARNING, "DRI3: Failed to initialize");
       }
 
-      return false;
+      return true;
    }
 
    loader_get_user_preferred_fd(&dri2_dpy->fd_render_gpu,
