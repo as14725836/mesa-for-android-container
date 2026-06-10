@@ -78,6 +78,105 @@ kgsl_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
 static void kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo);
 
 static VkResult
+kgsl_import_allocated_dmabuf(struct tu_device *dev,
+                             struct tu_bo **out_bo,
+                             uint64_t size,
+                             uint64_t align,
+                             int fd)
+{
+   /* tu_bo_init_dmabuf() only borrows the fd: it keeps a dup of its own in
+    * bo->shared_fd, which is what kgsl_bo_finish() closes. That is correct for
+    * an imported dma-buf, whose fd belongs to the caller, but here the fd is
+    * ours and nobody else will ever drop it. Leaking it keeps the dma-buf
+    * alive after the BO is destroyed, so the memory is never reclaimed.
+    */
+   VkResult result =
+      tu_bo_init_dmabuf(dev, out_bo, size, align, TU_BO_ALLOC_NO_FLAGS, fd);
+   close(fd);
+   return result;
+}
+
+static VkResult
+bo_init_new_ion_fd(struct tu_device *dev, struct tu_bo **out_bo,
+                   uint64_t size, int ion_fd)
+{
+   struct ion_new_allocation_data alloc = {
+      .len = size,
+      .heap_id_mask = KGSL_ION_SYSTEM_HEAP_MASK,
+      .flags = 0,
+      .fd = -1,
+   };
+
+   int ret = safe_ioctl(ion_fd, ION_IOC_NEW_ALLOC, &alloc);
+   if (ret) {
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "ION_IOC_NEW_ALLOC failed (%s)", strerror(errno));
+   }
+
+   return kgsl_import_allocated_dmabuf(dev, out_bo, size, 0, alloc.fd);
+}
+
+static VkResult
+bo_init_new_ion_legacy_fd(struct tu_device *dev, struct tu_bo **out_bo,
+                          uint64_t size, int ion_fd)
+{
+   struct ion_allocation_data alloc = {
+      .len = size,
+      .align = 4096,
+      .heap_id_mask = KGSL_ION_SYSTEM_HEAP_MASK,
+      .flags = 0,
+      .handle = -1,
+   };
+
+   int ret = safe_ioctl(ion_fd, ION_IOC_ALLOC, &alloc);
+   if (ret) {
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "ION_IOC_ALLOC failed (%s)", strerror(errno));
+   }
+
+   struct ion_fd_data share = {
+      .handle = alloc.handle,
+      .fd = -1,
+   };
+
+   ret = safe_ioctl(ion_fd, ION_IOC_SHARE, &share);
+   if (ret) {
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "ION_IOC_SHARE failed (%s)", strerror(errno));
+   }
+
+   struct ion_handle_data free = {
+      .handle = alloc.handle,
+   };
+   ret = safe_ioctl(ion_fd, ION_IOC_FREE, &free);
+   if (ret) {
+      close(share.fd);
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "ION_IOC_FREE failed (%s)", strerror(errno));
+   }
+
+   return kgsl_import_allocated_dmabuf(dev, out_bo, size, 0, share.fd);
+}
+
+static VkResult
+bo_init_new_ion_fallback(struct tu_device *dev, struct tu_bo **out_bo,
+                         uint64_t size)
+{
+   int ion_fd = open("/dev/ion", O_RDONLY);
+   if (ion_fd < 0)
+      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+
+   struct ion_handle_data free = { .handle = 0 };
+   bool legacy = safe_ioctl(ion_fd, ION_IOC_FREE, &free) >= 0 || errno != ENOTTY;
+
+   VkResult result = legacy ?
+      bo_init_new_ion_legacy_fd(dev, out_bo, size, ion_fd) :
+      bo_init_new_ion_fd(dev, out_bo, size, ion_fd);
+   close(ion_fd);
+   return result;
+}
+
+static VkResult
 bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
                 uint64_t align, enum tu_bo_alloc_flags flags)
 {
@@ -91,6 +190,12 @@ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
                     &alloc);
 
    if (ret) {
+      int dmaheap_errno = errno;
+      VkResult fallback = bo_init_new_ion_fallback(dev, out_bo, size);
+      if (fallback == VK_SUCCESS)
+         return VK_SUCCESS;
+
+      errno = dmaheap_errno;
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                        "DMA_HEAP_IOCTL_ALLOC failed (%s)", strerror(errno));
    }
@@ -291,6 +396,11 @@ kgsl_bo_init(struct tu_device *dev,
       if (client_iova) {
          return vk_errorf(dev, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
                           "cannot allocate an exportable BO with a fixed address");
+      }
+
+      if (dev->physical_device->kgsl_dma_fd < 0) {
+         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                          "no dma-heap or ION fd available for shareable KGSL BO");
       }
 
       switch(dev->physical_device->kgsl_dma_type) {

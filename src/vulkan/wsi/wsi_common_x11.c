@@ -77,6 +77,9 @@
 #ifndef XCB_PRESENT_CAPABILITY_ASYNC_MAY_TEAR
 #define XCB_PRESENT_CAPABILITY_ASYNC_MAY_TEAR 8
 #endif
+#ifndef XCB_VALUE
+#define XCB_VALUE 2
+#endif
 
 #define MAX_DAMAGE_RECTS 64
 
@@ -1265,6 +1268,10 @@ struct x11_swapchain {
    bool                                         has_mit_shm;
    bool                                         has_async_may_tear;
    bool                                         msc_estimate_is_stable;
+   /* Some X servers reject DRI3FenceFromFD for imported pixmaps.  Fall back
+    * to Present IdleNotify for implicit-sync image reuse when that happens.
+    */
+   bool                                         disable_shm_fences;
 
    xcb_connection_t *                           conn;
    xcb_window_t                                 window;
@@ -1795,7 +1802,8 @@ x11_present_to_x11_dri3(struct x11_swapchain *chain, uint32_t image_index,
        !wsi_device->x11.ignore_suboptimal)
       options |= XCB_PRESENT_OPTION_SUBOPTIMAL;
 
-   xshmfence_reset(image->shm_fence);
+   if (image->shm_fence)
+      xshmfence_reset(image->shm_fence);
 
    if (!chain->base.image_info.explicit_sync) {
       ++chain->sent_image_count;
@@ -2654,7 +2662,7 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
    xcb_void_cookie_t cookie;
    xcb_generic_error_t *error = NULL;
    uint32_t bpp = 32;
-   int fence_fd;
+   int fence_fd = -1;
    image->update_region = xcb_generate_id(chain->conn);
    xcb_xfixes_create_region(chain->conn, image->update_region, 0, NULL);
 
@@ -2690,7 +2698,8 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
             for (int j = 0; j < i; j++)
                close(fds[j]);
 
-            return VK_ERROR_OUT_OF_HOST_MEMORY;
+            result = VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto fail_image;
          }
       }
 
@@ -2718,8 +2727,10 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
 
       /* XCB will take ownership of the FD we pass it. */
       int fd = os_dupfd_cloexec(image->base.dma_buf_fd);
-      if (fd == -1)
-         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      if (fd == -1) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto fail_image;
+      }
 
       cookie =
          xcb_dri3_pixmap_from_buffer_checked(chain->conn,
@@ -2760,6 +2771,12 @@ x11_image_init(VkDevice device_h, struct x11_swapchain *chain,
 #endif
 
 out_fence:
+   if (chain->disable_shm_fences && !chain->base.image_info.explicit_sync) {
+      image->shm_fence = NULL;
+      image->sync_fence = XCB_NONE;
+      return VK_SUCCESS;
+   }
+
    fence_fd = xshmfence_alloc_shm();
    if (fence_fd < 0)
       goto fail_pixmap;
@@ -2769,17 +2786,38 @@ out_fence:
       goto fail_shmfence_alloc;
 
    image->sync_fence = xcb_generate_id(chain->conn);
-   xcb_dri3_fence_from_fd(chain->conn,
-                          image->pixmap,
-                          image->sync_fence,
-                          false,
-                          fence_fd);
+   cookie = xcb_dri3_fence_from_fd_checked(chain->conn,
+                                           image->pixmap,
+                                           image->sync_fence,
+                                           false,
+                                           fence_fd);
+   fence_fd = -1;
+   error = xcb_request_check(chain->conn, cookie);
+   if (error != NULL) {
+      const uint8_t error_code = error->error_code;
+      free(error);
+
+      if (error_code == XCB_VALUE && !chain->base.image_info.explicit_sync) {
+         chain->disable_shm_fences = true;
+         image->sync_fence = XCB_NONE;
+         xshmfence_unmap_shm(image->shm_fence);
+         image->shm_fence = NULL;
+         return VK_SUCCESS;
+      }
+
+      goto fail_shmfence_map;
+   }
 
    xshmfence_trigger(image->shm_fence);
    return VK_SUCCESS;
 
+fail_shmfence_map:
+   xshmfence_unmap_shm(image->shm_fence);
+   image->shm_fence = NULL;
+
 fail_shmfence_alloc:
-   close(fence_fd);
+   if (fence_fd >= 0)
+      close(fence_fd);
 
 fail_pixmap:
    cookie = xcb_free_pixmap(chain->conn, image->pixmap);
@@ -2791,7 +2829,7 @@ fail_image:
 #else
    UNREACHABLE("SHM support not compiled in");
 #endif
-   return VK_ERROR_INITIALIZATION_FAILED;
+   return result != VK_SUCCESS ? result : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 static void
@@ -2802,9 +2840,12 @@ x11_image_finish(struct x11_swapchain *chain,
    xcb_void_cookie_t cookie;
    if (!chain->base.wsi->sw || chain->has_mit_shm) {
 #ifdef HAVE_X11_DRM
-      cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
-      xcb_discard_reply(chain->conn, cookie.sequence);
-      xshmfence_unmap_shm(image->shm_fence);
+      if (image->sync_fence != XCB_NONE) {
+         cookie = xcb_sync_destroy_fence(chain->conn, image->sync_fence);
+         xcb_discard_reply(chain->conn, cookie.sequence);
+      }
+      if (image->shm_fence)
+         xshmfence_unmap_shm(image->shm_fence);
 #endif
 
       cookie = xcb_free_pixmap(chain->conn, image->pixmap);
@@ -3290,7 +3331,8 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->sent_image_count = 0;
    chain->last_present_msc = 0;
    chain->status = VK_SUCCESS;
-   chain->has_dri3_modifiers = wsi_conn->has_dri3_modifiers;
+   chain->has_dri3_modifiers = wsi_conn->has_dri3_modifiers &&
+                                use_modifiers(wsi_device);
    chain->has_mit_shm = wsi_conn->has_mit_shm;
    chain->has_async_may_tear = present_caps & XCB_PRESENT_CAPABILITY_ASYNC_MAY_TEAR;
    chain->has_reliable_msc = !wsi_conn->is_xwayland;
