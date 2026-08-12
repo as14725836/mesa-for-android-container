@@ -1924,7 +1924,21 @@ tu6_emit_sysmem_resolves(struct tu_cmd_buffer *cmd,
                          struct tu_cs *cs,
                          const struct tu_subpass *subpass)
 {
+   /* Every slot can be UNUSED if there are no resolves. Don't pay the flushes
+    * below for an empty one.
+    */
+   bool any_resolves = false;
    if (subpass->resolve_attachments) {
+      for (unsigned i = 0; i < subpass->resolve_count; i++) {
+         if (subpass->resolve_attachments[i].attachment !=
+             VK_ATTACHMENT_UNUSED) {
+            any_resolves = true;
+            break;
+         }
+      }
+   }
+
+   if (any_resolves) {
       /* From the documentation for vkCmdNextSubpass, section 7.4 "Render Pass
        * Commands":
        *
