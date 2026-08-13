@@ -1282,6 +1282,12 @@ enum pipe_context_param
     * default to c = 0.
     */
    PIPE_CONTEXT_PARAM_MAG_SWITCHOVER_HALF,
+
+   /* The next flush is used as an explicit presentation fence.  Drivers may
+    * use this to avoid implicit-sync fallbacks while the frontend requests a
+    * native fence from the same submission.
+    */
+   PIPE_CONTEXT_PARAM_EXPLICIT_PRESENT_FENCE,
 };
 
 /**
