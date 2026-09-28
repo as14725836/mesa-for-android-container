@@ -1408,6 +1408,7 @@ a8xx_base = GPUProps(
         round_robin_errata = False,
         max_texel_buffer_range_elements = (1 << 29) - 1,
         max_storage_buffer_range_bytes = (1 << 31) - 1,
+        cube_coord_hang_quirk = True,
 
         QCTDD10204462 = False,
         QCTDD11147232 = False,
