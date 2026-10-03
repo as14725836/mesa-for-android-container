@@ -502,10 +502,11 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->sparseBinding = pdevice->has_sparse;
    features->sparseResidencyBuffer = pdevice->has_sparse_prr;
    features->sparseResidencyImage2D = pdevice->has_sparse_prr &&
+      pdevice->info->props.supports_sparse_image_2d;
+   features->sparseResidency2Samples = features->sparseResidencyImage2D &&
       pdevice->info->props.ubwc_all_formats_compatible;
-   features->sparseResidency2Samples = features->sparseResidencyImage2D;
-   features->sparseResidency4Samples = features->sparseResidencyImage2D;
-   features->sparseResidency8Samples = features->sparseResidencyImage2D;
+   features->sparseResidency4Samples = features->sparseResidency2Samples;
+   features->sparseResidency8Samples = features->sparseResidency2Samples;
    features->sparseResidencyAliased = pdevice->has_sparse_prr;
    features->shaderResourceResidency = pdevice->has_sparse_prr;
    features->shaderResourceMinLod = true;

@@ -98,6 +98,64 @@ tu6_mutable_format_list_ubwc_compatible(const struct fd_dev_info *info,
 }
 
 bool
+tu_is_r8g8(enum pipe_format format)
+{
+   return (util_format_get_blocksize(format) == 2) &&
+          (util_format_get_nr_components(format) == 2);
+}
+
+bool
+tu_is_r8g8_compatible(enum pipe_format format)
+{
+   return (util_format_get_blocksize(format) == 2) &&
+          !util_format_is_depth_or_stencil(format);
+}
+
+bool
+tu6_mutable_format_list_requires_linear(
+   VkFormat format, const VkImageFormatListCreateInfo *fmt_list)
+{
+   enum pipe_format pipe_format = vk_format_to_pipe_format(format);
+
+   /* r8g8 formats use a different tiled layout from other compatible 16-bit
+    * formats. if there is no format list, any compatible format is allowed.
+    */
+   if (tu_is_r8g8_compatible(pipe_format)) {
+      if (!fmt_list || !fmt_list->viewFormatCount)
+         return true;
+
+      bool has_r8g8 = false;
+      bool has_non_r8g8 = false;
+
+      for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
+         if (tu_is_r8g8(vk_format_to_pipe_format(fmt_list->pViewFormats[i])))
+            has_r8g8 = true;
+         else
+            has_non_r8g8 = true;
+      }
+
+      if (has_r8g8 && has_non_r8g8)
+         return true;
+   }
+
+   /* tiled mutable images cannot use a format which requires a component
+    * swap on hardware without mutable-format tiled support.
+    */
+   if (!fmt_list || !fmt_list->viewFormatCount)
+      return true;
+
+   for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
+      enum pipe_format view_format =
+         vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
+
+      if (tu6_format_texture(view_format, TILE6_LINEAR, false).swap)
+         return true;
+   }
+
+   return false;
+}
+
+bool
 tu_format_linear_filtering_supported(struct tu_physical_device *physical_device,
                                      VkFormat vk_format)
 {
@@ -587,12 +645,38 @@ tu_get_image_format_properties(
    }
 
    if (info->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
-      if (!(physical_device->has_sparse_prr && physical_device->info->props.ubwc_all_formats_compatible))
+      /* single-sample sparse images are gated separately from A750's
+       * mutable UBWC flag. multisample sparse residency stays on that flag.
+       */
+      if (!(physical_device->has_sparse_prr &&
+            physical_device->info->props.supports_sparse_image_2d))
          return tu_image_unsupported_format(pImageFormatProperties);
+
+      /* VkPhysicalDeviceImageFormatInfo2 has no sample count. Multisample
+       * sparse residency stays off through the feature bits, which still
+       * require ubwc_all_formats_compatible.
+       */
 
       /* Don't support multi-planar formats with sparse yet */
       if (vk_format_get_plane_count(info->format) > 1)
          return tu_image_unsupported_format(pImageFormatProperties);
+
+      /* sparse images must remain tiled. older A7xx hardware cannot keep
+       * every mutable format list tiled, so reject those combinations before
+       * image creation instead of falling back to a linear layout.
+       */
+      if ((info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
+          !vk_format_is_depth_or_stencil(info->format) &&
+          !physical_device->info->props.ubwc_all_formats_compatible) {
+         const VkImageFormatListCreateInfo *format_list =
+            vk_find_struct_const(info->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
+
+         if (!tu6_mutable_format_list_ubwc_compatible(physical_device->info,
+                                                      format_list) &&
+             tu6_mutable_format_list_requires_linear(info->format,
+                                                     format_list))
+            return tu_image_unsupported_format(pImageFormatProperties);
+      }
 
       /* Sparse isn't compatible with HIC */
       if (info->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT)

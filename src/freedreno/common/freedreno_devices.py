@@ -857,6 +857,7 @@ a7xx_gen3 = GPUProps(
         has_generic_clear = True,
         gs_vpc_adjacency_quirk = True,
         ubwc_all_formats_compatible = True,
+        supports_sparse_image_2d = True,
         has_compliant_dp4acc = True,
         ubwc_coherency_quirk = True,
         has_persistent_counter = True,
@@ -1235,6 +1236,24 @@ add_gpus([
         GPUId(740), # Deprecated, used for dev kernels.
         GPUId(chip_id=0x43050a01, name="FD740"), # KGSL, no speedbin data
         GPUId(chip_id=0xffff43050a01, name="FD740"), # Default no-speedbin fallback
+    ], A6xxGPUInfo(
+        CHIP.A7XX,
+        [a7xx_base, a7xx_gen2, GPUProps(supports_sparse_image_2d = True)],
+        num_ccu = 6,
+        tile_align_w = 96,
+        tile_align_h = 32,
+        tile_max_w = 2016,
+        tile_max_h = 2032,
+        num_vsc_pipes = 32,
+        cs_shared_mem_size = 32 * 1024,
+        wave_granularity = 2,
+        fibers_per_sp = 128 * 2 * 16,
+        highest_bank_bit = 16,
+        raw_magic_regs = a740_raw_magic_regs,
+    ))
+# X1-85 shares the a740 gen2 programming, but sparse 2D residency was only
+# exercised on FD740. Leave it gated until that chip has its own CTS run.
+add_gpus([
         GPUId(chip_id=0xffff43050c01, name="Adreno X1-85"),
     ], A6xxGPUInfo(
         CHIP.A7XX,

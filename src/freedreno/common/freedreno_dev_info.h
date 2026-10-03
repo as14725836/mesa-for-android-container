@@ -404,6 +404,11 @@ struct fd_dev_info {
        */
       bool ubwc_all_formats_compatible;
 
+      /* single-sample sparse 2D residency. multisample stays tied to
+       * ubwc_all_formats_compatible.
+       */
+      bool supports_sparse_image_2d;
+
       bool has_compliant_dp4acc;
 
       /* Whether a single clear blit could be used for both sysmem and gmem.*/

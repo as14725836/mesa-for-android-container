@@ -123,20 +123,6 @@ tu_format_for_aspect(enum pipe_format format, VkImageAspectFlags aspect_mask)
    }
 }
 
-static bool
-tu_is_r8g8(enum pipe_format format)
-{
-   return (util_format_get_blocksize(format) == 2) &&
-          (util_format_get_nr_components(format) == 2);
-}
-
-static bool
-tu_is_r8g8_compatible(enum pipe_format format)
-{
-   return (util_format_get_blocksize(format) == 2) &&
-          !util_format_is_depth_or_stencil(format);
-}
-
 uint64_t
 tu_layer_address(const struct fdl6_view *iview, uint32_t layer)
 {
@@ -432,55 +418,6 @@ ubwc_possible(struct tu_device *device,
    return true;
 }
 
-/* R8G8 have a different block width/height and height alignment from other
- * formats that would normally be compatible (like R16), and so if we are
- * trying to, for example, sample R16 as R8G8 we need to demote to linear.
- */
-static bool
-format_list_reinterprets_r8g8_r16(enum pipe_format format, const VkImageFormatListCreateInfo *fmt_list)
-{
-   /* Check if it's actually a 2-cpp color format. */
-   if (!tu_is_r8g8_compatible(format))
-      return false;
-
-   /* If there's no format list, then the app may reinterpret to any compatible
-    * format.
-    */
-   if (!fmt_list || !fmt_list->viewFormatCount)
-      return true;
-
-   bool has_r8g8 = false;
-   bool has_non_r8g8 = false;
-   for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
-      enum pipe_format format =
-         vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
-      if (tu_is_r8g8(format))
-         has_r8g8 = true;
-      else
-         has_non_r8g8 = true;
-   }
-   return has_r8g8 && has_non_r8g8;
-}
-
-static bool
-format_list_has_swaps(const VkImageFormatListCreateInfo *fmt_list)
-{
-   /* If there's no format list, then the app may reinterpret to any compatible
-    * format, and presumably one would have the swap set.
-    */
-   if (!fmt_list || !fmt_list->viewFormatCount)
-      return true;
-
-   for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
-      enum pipe_format format =
-         vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
-
-      if (tu6_format_texture(format, TILE6_LINEAR, false).swap)
-         return true;
-   }
-   return false;
-}
-
 static bool
 format_list_has_uncompressed_format(
    const VkImageFormatListCreateInfo *fmt_list)
@@ -650,10 +587,8 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
                ubwc_enabled = false;
             }
 
-            bool r8g8_r16 = format_list_reinterprets_r8g8_r16(vk_format_to_pipe_format(image->vk.format), fmt_list);
-            bool fmt_list_has_swaps = format_list_has_swaps(fmt_list);
-
-            if (r8g8_r16 || fmt_list_has_swaps) {
+            if (tu6_mutable_format_list_requires_linear(image->vk.format,
+                                                        fmt_list)) {
                ubwc_enabled = false;
                force_linear_tile = true;
             }
