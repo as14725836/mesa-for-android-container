@@ -1658,9 +1658,7 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 128 * 2 * 16,
         highest_bank_bit = 16,
-        magic_regs = dict(),
         raw_magic_regs = a8xx_base_raw_magic_regs,
     ))
-
 if __name__ == "__main__":
     main()
