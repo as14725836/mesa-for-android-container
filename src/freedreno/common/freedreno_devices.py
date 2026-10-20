@@ -1546,13 +1546,14 @@ add_gpus([
         GPUId(chip_id=0x44030000, name="Adreno (TM) 825"),
     ], A6xxGPUInfo(
         CHIP.A8XX,
-        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
-         GPUProps(
-            shading_rate_matches_vk = True,  # TODO confirm this
+        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen1, GPUProps(
+            # A825 is a cut-down A830 (same gen8_6_0 family, 4 CCUs vs 6), so
+            # it takes a8xx_gen1 like its bigger sibling. Only the depth-cache
+            # sizing is narrowed here; no device was available to measure it,
+            # and this is the config both external A8xx patch sets agree on.
             sysmem_ccu_depth_cache_fraction = CCUColorCacheFraction.THREE_QUARTER.value,
             sysmem_per_ccu_depth_cache_size = 96 * 1024,
-            gmem_per_ccu_depth_cache_size = 127 * 1024,
-         )],
+        )],
         num_ccu = 4,
         num_slices = 2,
         tile_align_w = 96,
