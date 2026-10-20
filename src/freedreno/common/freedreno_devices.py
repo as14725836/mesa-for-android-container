@@ -1402,6 +1402,12 @@ add_gpus([
 a8xx_base = GPUProps(
         has_dp2acc = False,
         reg_size_vec4 = 96,
+        # 64-bit image atomics hang the GPU on the first submit on a8xx,
+        # which shows up as a black screen in UE5 / VKD3D-Proton SM6.6
+        # workloads. EXT_shader_image_atomic_int64 was only just added
+        # upstream (5b87bbfad3b), so dropping it here costs little: use
+        # FD_DEV_FEATURES=has_64b_image_atomics=1 to re-enable per device.
+        has_64b_image_atomics = False,
         has_rt_workaround = False,
         supports_double_threadsize = False,
         has_dual_wave_dispatch = True,
