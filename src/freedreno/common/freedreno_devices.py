@@ -1488,6 +1488,7 @@ a8xx_gen2 = GPUProps(
 )
 
 add_gpus([
+       GPUId(chip_id=0x44010000, name="Adreno (TM) 810"), # KGSL
        GPUId(chip_id=0xffff44010000, name="Adreno (TM) 810"),
     ], A6xxGPUInfo(
         CHIP.A8XX,
@@ -1508,6 +1509,7 @@ add_gpus([
             # This is possibly also needed for a830 (and all of a8xx),
             # move to a8xx_base if confirmed needed for a830.
             has_fs_tex_prefetch = False,
+            disable_gmem = True,
         )],
         num_ccu = 1,
         num_slices = 1,
@@ -1567,6 +1569,8 @@ add_gpus([
         raw_magic_regs = a8xx_base_raw_magic_regs,
     ))
 add_gpus([
+        GPUId(chip_id=0x44030A00, name="Adreno (TM) 829"), # KGSL
+        GPUId(chip_id=0xffff44030A00, name="Adreno (TM) 829"), # KGSL any-speedbin
         GPUId(chip_id=0x44030a20, name="Adreno (TM) 829"), # KGSL
     ], A6xxGPUInfo(
         CHIP.A8XX,
@@ -1574,6 +1578,7 @@ add_gpus([
          GPUProps(
             shading_rate_matches_vk = True,  # TODO confirm this
             sysmem_vpc_bv_pos_buf_size = 24576,
+            disable_gmem = True,
          )],
         num_ccu = 4,
         num_slices = 2,
