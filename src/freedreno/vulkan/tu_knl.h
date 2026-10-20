@@ -60,6 +60,8 @@ struct tu_bo {
 
    /* Virtual BO the GPU accesses this BO through, or 0 if none. */
    uint32_t alias_handle;
+   uint32_t kgsl_alloc_flags;
+   uint64_t kgsl_alloc_size;
 #endif
 
    bool implicit_sync : 1;

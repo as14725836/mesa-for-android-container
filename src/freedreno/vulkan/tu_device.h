@@ -363,6 +363,10 @@ struct tu_device
    struct tu_suballocator kgsl_profiling_suballoc;
    mtx_t kgsl_profiling_mutex;
 
+#ifdef TU_HAS_KGSL
+   struct kgsl_ib_cache *kgsl_ib_cache;
+#endif
+
    /* VkEvent BO suballocator.  Synchronized by event_mutex.
     */
    struct tu_suballocator event_suballoc;
