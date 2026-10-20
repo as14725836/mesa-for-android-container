@@ -1,5 +1,8 @@
 name: macOS-CI
-on: push
+# Disabled on this branch on purpose: the macOS runner never picks up work for
+# this fork and each push leaves a run queued forever. Re-enable by restoring
+# "on: push" if macOS coverage is ever wanted here.
+on: workflow_dispatch
 
 permissions:
   contents: read
