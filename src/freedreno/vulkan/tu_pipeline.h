@@ -163,6 +163,7 @@ struct tu_pipeline_executable {
    mesa_shader_stage stage;
 
    struct ir3_info stats;
+   uint32_t subgroup_size;
    bool is_binning;
 
    char *nir_from_spirv;

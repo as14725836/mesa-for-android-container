@@ -1116,6 +1116,9 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
        * it here. Beyond this point nir_intrinsic_load_subgroup_size will return
        * the "real" subgroup size.
        */
+      if (shader->options.api_wavesize == IR3_HALF_ONLY)
+         OPT(s, ir3_nir_lower_half_subgroups);
+
       unsigned subgroup_size = 0, max_subgroup_size = 0;
       ir3_shader_get_subgroup_size(compiler, &shader->options, s->info.stage,
                                    &subgroup_size, &max_subgroup_size);

@@ -201,6 +201,16 @@ tu_subgroup_size(const struct tu_physical_device *device)
           (device->expose_double_threadsize ? 2 : 1);
 }
 
+/* Subgroups of half a wave are emulated on top of the hardware subgroup
+ * operations.
+ */
+static uint32_t
+tu_min_subgroup_size(const struct tu_physical_device *device)
+{
+   return device->info->threadsize_base /
+          (device->info->props.has_getfiberid ? 2 : 1);
+}
+
 static void
 get_device_extensions(const struct tu_physical_device *device,
                       struct vk_device_extension_table *ext)
@@ -1107,16 +1117,16 @@ static void
 tu_get_physical_device_properties_1_3(struct tu_physical_device *pdevice,
                                       struct vk_properties *p)
 {
-   p->minSubgroupSize = pdevice->info->threadsize_base;
+   p->minSubgroupSize = tu_min_subgroup_size(pdevice);
    p->maxSubgroupSize = tu_subgroup_size(pdevice);
-   p->maxComputeWorkgroupSubgroups = pdevice->info->max_waves;
+   p->maxComputeWorkgroupSubgroups = pdevice->info->max_waves *
+      pdevice->info->threadsize_base / p->minSubgroupSize;
    /* Only compute and fragment shaders can run with a doubled wave size, the
-    * geometry stages always run at threadsize_base.  So when we expose more
-    * than one possible subgroup size we can't honor a required subgroup size
-    * in those stages.
+    * geometry stages always run at threadsize_base.  So when we expose the
+    * doubled size we can't honor a required subgroup size in those stages.
     */
    p->requiredSubgroupSizeStages =
-      p->minSubgroupSize == p->maxSubgroupSize
+      !pdevice->expose_double_threadsize
          ? VK_SHADER_STAGE_ALL
          : (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
