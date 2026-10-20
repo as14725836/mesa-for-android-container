@@ -1,0 +1,165 @@
+name: build-check-kgsl
+
+# Build-level verification for the Adreno/KGSL work on this branch.
+#
+# This is a compile-only smoke test. It does not produce shippable binaries
+# and it does not run any GPU test (no KGSL device on a CI runner). It answers
+# exactly one question: does the tree still configure and build with the KGSL
+# kernel-mode driver enabled, and does the KGSL code really end up in the
+# objects we produce?
+#
+# Assertions, in order:
+#   1. meson accepts -Dfreedreno-kmds=msm,kgsl
+#   2. -DHAVE_FREEDRENO_KGSL reaches the compile command line
+#   3. the Gallium-side KGSL backend sources are in the build graph
+#   4. the freedreno Gallium driver compiles
+#   5. Turnip (libvulkan_freedreno.so) compiles and links
+#   6. the DRI mega-driver compiles and links
+#   7. KGSL symbols are present in both final binaries
+
+on:
+  push:
+    branches:
+      - 'adreno-main-27'
+      - 'adreno-main'
+      - 'adreno-**'
+  pull_request:
+    branches:
+      - 'adreno-main-27'
+      - 'adreno-main'
+  workflow_dispatch:
+    inputs:
+      build_arm64:
+        description: 'Also build natively on an arm64 runner'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MESON_ARGS: >-
+    -Dfreedreno-kmds=msm,kgsl
+    -Dgallium-drivers=freedreno,zink
+    -Dvulkan-drivers=freedreno
+    -Degl=enabled
+    -Dglx=disabled
+    -Dplatforms=x11
+    -Dgallium-va=disabled
+    -Dvideo-codecs=
+    -Dbuild-tests=false
+
+jobs:
+  build-x86_64:
+    name: build (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps: &build-steps
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3 python3-pip python3-setuptools \
+            libdrm-dev libexpat1-dev zlib1g-dev libzstd-dev libarchive-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-shm0-dev \
+            libxcb-keysyms1-dev libxcb-dri3-dev libxcb-present-dev \
+            libxcb-sync-dev libxcb-xfixes0-dev libxshmfence-dev libxrandr-dev \
+            libglvnd-dev libwayland-dev
+
+      - name: Install meson and python build deps
+        run: |
+          python3 -m pip install --user --upgrade \
+            'meson>=1.4' mako pyyaml packaging
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/meson" --version
+
+      - name: Configure
+        run: |
+          set -o pipefail
+          meson setup build $MESON_ARGS 2>&1 | tee meson-setup.log
+          echo '--- freedreno-kmds as configured:'
+          grep -i 'freedreno-kmds' build/meson-logs/meson-log.txt || true
+
+      - name: Assert the KGSL KMD was accepted
+        run: |
+          grep -q -i 'freedreno-kmds.*kgsl' build/meson-logs/meson-log.txt \
+            || { echo '::error::meson did not accept kgsl in -Dfreedreno-kmds'; exit 1; }
+          grep -q 'HAVE_FREEDRENO_KGSL' build/build.ninja \
+            || { echo '::error::-DHAVE_FREEDRENO_KGSL never reached the compile line'; exit 1; }
+          # The Gallium-side KGSL backend is what this branch adds on top of
+          # upstream Mesa; make sure its sources are actually in the build graph.
+          for o in kgsl_kgsl_bo kgsl_kgsl_device kgsl_kgsl_pipe kgsl_kgsl_ringbuffer_sp; do
+            grep -q "$o.c.o" build/build.ninja \
+              || { echo "::error::KGSL backend object $o is not in the build graph"; exit 1; }
+          done
+          echo 'OK: KGSL kernel-mode driver is enabled and its sources are built.'
+
+      - name: Build freedreno DRM backends
+        run: |
+          ninja -C build src/freedreno/drm/libfreedreno_drm.a
+
+      - name: Build freedreno Gallium driver
+        run: |
+          ninja -C build src/gallium/drivers/freedreno/libfreedreno.a
+
+      - name: Build Turnip
+        run: |
+          ninja -C build src/freedreno/vulkan/libvulkan_freedreno.so
+
+      - name: Build DRI mega-driver
+        run: |
+          set -o pipefail
+          target=$(ninja -C build -t targets all \
+                   | sed -n 's|^\(src/gallium/targets/dri/libgallium[^:]*\.so\):.*|\1|p' \
+                   | head -n1)
+          echo "DRI target: $target"
+          test -n "$target" || { echo '::error::no libgallium*.so target found'; exit 1; }
+          ninja -C build "$target"
+
+      - name: Verify the KGSL code is in the binaries
+        run: |
+          set -e
+          turnip=build/src/freedreno/vulkan/libvulkan_freedreno.so
+          dri=$(ls build/src/gallium/targets/dri/libgallium*.so | head -n1)
+
+          test -f "$turnip" || { echo "::error::missing artifact: $turnip"; exit 1; }
+          test -n "$dri"     || { echo '::error::missing libgallium*.so'; exit 1; }
+
+          echo '--- Turnip: KGSL symbols'
+          nm -C "$turnip" | grep -i kgsl | head -n 20
+          nm -C "$turnip" | grep -qi 'kgsl_bo_init' \
+            || { echo '::error::no kgsl_bo_init in Turnip'; exit 1; }
+
+          echo '--- Gallium DRI driver: KGSL backend symbols'
+          nm -C "$dri" | grep -i 'kgsl_pipe' | head -n 20
+          nm -C "$dri" | grep -qi 'kgsl_pipe_new' \
+            || { echo '::error::no kgsl_pipe_new in the DRI driver, KGSL backend was not linked'; exit 1; }
+
+          echo 'OK: KGSL code paths are linked into both Turnip and the DRI driver.'
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.job }}
+          path: |
+            meson-setup.log
+            build/meson-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  build-aarch64:
+    name: build (aarch64)
+    # arm64 runners are only available for public repositories, so keep this
+    # leg opt-in instead of letting every push fail on it.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_arm64 }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps: *build-steps
