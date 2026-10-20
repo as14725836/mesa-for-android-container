@@ -47,7 +47,7 @@ env:
     -Dgallium-drivers=freedreno,zink
     -Dvulkan-drivers=freedreno
     -Degl=enabled
-    -Dglx=disabled
+    -Dglx=dri
     -Dplatforms=x11
     -Dgallium-va=disabled
     -Dvideo-codecs=
@@ -74,7 +74,7 @@ jobs:
             libx11-dev libx11-xcb-dev libxcb1-dev libxcb-shm0-dev \
             libxcb-keysyms1-dev libxcb-dri3-dev libxcb-present-dev \
             libxcb-sync-dev libxcb-xfixes0-dev libxcb-randr0-dev \
-            libxshmfence-dev libxrandr-dev libglvnd-dev \
+            libxshmfence-dev libxrandr-dev libglvnd-dev libxcb-glx0-dev libxxf86vm-dev \
             libwayland-dev libwayland-bin libxkbcommon-dev
 
       - name: Install meson and python build deps
