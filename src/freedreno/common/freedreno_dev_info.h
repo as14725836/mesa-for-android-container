@@ -472,6 +472,12 @@ struct fd_dev_info {
       /* Whether the device supports the image processing opcode */
       bool has_image_processing;
 
+      /* GMEM cannot be used on this GPU, so every render pass has to be
+       * forced to sysmem rendering. This is for parts whose firmware
+       * reports a GMEM layout the driver cannot drive correctly.
+       */
+      bool disable_gmem;
+
       /* The amount of valid draw state IDs. */
       uint32_t max_draw_states;
 

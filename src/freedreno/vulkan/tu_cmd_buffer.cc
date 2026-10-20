@@ -1425,6 +1425,12 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
       return true;
    }
 
+   /* GMEM on this GPU cannot be driven correctly, so never try to tile. */
+   if (cmd->device->physical_device->dev_info.props.disable_gmem) {
+      cmd->state.rp.force_render_mode_reason = "GMEM unusable on this GPU";
+      return true;
+   }
+
    /* can't fit attachments into gmem */
    if (!cmd->state.tiling->possible) {
       cmd->state.rp.force_render_mode_reason = "Can't fit attachments into gmem";
