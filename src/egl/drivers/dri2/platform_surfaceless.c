@@ -402,7 +402,7 @@ dri2_initialize_surfaceless(_EGLDisplay *disp)
 
          if (dri2_dpy->driver_name) {
             dri2_detect_swrast_kopper(disp);
-            dri2_dpy->loader_extensions = image_loader_extensions;
+            dri2_dpy->loader_funcs = &image_loader_funcs;
 
             /* KGSL is not enumerated as an EGLDevice, but it still needs a
              * DRI screen before dri2_setup_screen() reads screen caps.
