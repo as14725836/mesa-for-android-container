@@ -9,6 +9,8 @@
 
 #include "tu_device.h"
 
+#include <stdlib.h>
+
 #include "drm-uapi/drm_fourcc.h"
 #include "git_sha1.h"
 #include "perfcntrs/freedreno_perfcntr.h"
@@ -1964,6 +1966,27 @@ tu_init_dri_options(struct tu_instance *instance)
       instance->drirc.perf.allow_concurrent_binning = false;
    if (TU_DEBUG(FORCE_CONCURRENT_BINNING))
       instance->drirc.perf.allow_concurrent_binning = true;
+
+   /* [android-perf] Concurrent binning lets BV run ahead of BR.  Upstream
+    * keeps it off by default because desktop games regress, but the vast
+    * majority of Android titles are tile-friendly and benefit from it.
+    *
+    * The per-frame safety conditions in tu7_emit_concurrent_binning_start()
+    * (LRZ fast clear, partial LRZ coverage, xfb / prim-gen / prim-counter /
+    * vtx-stats queries, hardware binning) are unchanged, and the BV-lagging
+    * timestamp check still disables CB dynamically, so this only flips the
+    * global default.
+    *
+    * Override with DXVK_TURNIP_CONCURRENT_BINNING=0/1. */
+   if (!TU_DEBUG(NO_CONCURRENT_BINNING) && !TU_DEBUG(FORCE_CONCURRENT_BINNING)) {
+      const char *cb_env = getenv("DXVK_TURNIP_CONCURRENT_BINNING");
+      if (cb_env != NULL && cb_env[0] != '\0') {
+         if (cb_env[0] == '0' && cb_env[1] == '\0')
+            instance->drirc.perf.allow_concurrent_binning = false;
+         else if (cb_env[0] == '1' && cb_env[1] == '\0')
+            instance->drirc.perf.allow_concurrent_binning = true;
+      }
+   }
 }
 
 static uint32_t instance_count = 0;
