@@ -183,6 +183,23 @@ __fd_resource_wait(struct fd_context *ctx, struct fd_resource *rsc, unsigned op,
    return ret;
 }
 
+static bool
+needs_ubwc_clear(struct fd_screen *screen, enum pipe_format pfmt, int nr_samples)
+{
+   if (!FD_QUIRK(screen->info, QCTDD06315140_ubwc_clear))
+      return false;
+
+   if (util_format_get_blocksize(pfmt) != 2)
+      return false;
+
+   /* For r8g8 formats, only needed for MSAA 2x+ */
+   if ((util_format_get_nr_components(pfmt) == 2) && (nr_samples < 2))
+      return false;
+
+   /* Needed for all other 16b formats: */
+   return true;
+}
+
 static void
 realloc_bo(struct fd_resource *rsc, uint32_t size)
 {
@@ -213,7 +230,8 @@ realloc_bo(struct fd_resource *rsc, uint32_t size)
     * around the issue, but any memset value seems to.
     */
    if (rsc->layout.ubwc) {
-      rsc->needs_ubwc_clear = true;
+      rsc->needs_ubwc_clear =
+         needs_ubwc_clear(screen, prsc->format, prsc->nr_samples);
    }
 
    util_range_set_empty(&rsc->valid_buffer_range);

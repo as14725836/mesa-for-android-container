@@ -515,6 +515,8 @@ struct fd_dev_info {
       /* Set RB_DBG_ECO_CNTL b24 for 2d blits
        */
       bool QCTDD04536579 : 1;
+      /* Clear ubwc flag data for 16b formats: */
+      bool QCTDD06315140_ubwc_clear : 1;
       /* movs performs half->full conversion if src_type is half, regardless
        * of dst_type
        */
