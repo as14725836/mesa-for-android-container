@@ -1177,6 +1177,9 @@ add_gpus([
         GPUId(chip_id=0xffff43030c00, name="Adreno X1-45"),
         GPUId(chip_id=0xffff43030B00, name="FD735"),
         GPUId(chip_id=0xffff43030E01, name="Adreno (TM) 735"),
+        # fallback wildcard entries for speculative Adreno 732 (patch_id unknown) — should be last:
+        GPUId(chip_id=0x43030aff, name="FD735"),     # speculative Adreno 732, wildcard patch_id
+        GPUId(chip_id=0xffff43030aff, name="FD735"), # speculative Adreno 732, any-speedbin + wildcard patch_id
     ], A6xxGPUInfo(
         CHIP.A7XX,
         [a7xx_base, a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)],
