@@ -1,0 +1,338 @@
+name: 测试版 Mesa (aarch64/Arch Linux, Auto Update + Detailed Log)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-updates:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      new_commit: ${{ steps.check.outputs.new_commit }}
+      latest_hash: ${{ steps.check.outputs.latest_hash }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 检查 Mesa 上游更新
+        id: check
+        run: |
+          echo "🔍 检查 Mesa 上游提交..."
+          LATEST_HASH=$(git ls-remote https://gitlab.freedesktop.org/mesa/mesa.git refs/heads/main | awk '{print $1}')
+          echo "最新上游提交: $LATEST_HASH"
+
+          STATE_FILE=".mesa_latest_commit"
+          if [ -f "$STATE_FILE" ]; then
+            LAST_HASH=$(tr -d '[:space:]' < "$STATE_FILE")
+          else
+            LAST_HASH=""
+          fi
+          echo "上次构建: ${LAST_HASH:-（无记录）}"
+
+          if [ -n "$LATEST_HASH" ] && [ "$LATEST_HASH" != "$LAST_HASH" ]; then
+            echo "new_commit=true" >> "$GITHUB_OUTPUT"
+            echo "latest_hash=$LATEST_HASH" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_commit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check-updates
+    concurrency:
+      group: turnip-release
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    # Arch Linux ARM64，每日由 GitHub Actions 重建
+    # https://github.com/menci/docker-archlinuxarm
+    container:
+      image: menci/archlinuxarm:base-devel
+      # pacman 7.x 的 Landlock 沙箱在容器内无法生效，需要特权模式
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 确认容器环境并安装 git
+        run: |
+          echo "=== Arch Linux 环境 ==="
+          head -3 /etc/os-release || true
+          uname -m || true
+
+          # 镜像里 pacman 数据库为空，必须先刷新才能装包；
+          # 且 actions/checkout 依赖 git，所以这一步要先装好 git
+          pacman -Syu --noconfirm --needed --disable-sandbox git
+
+          echo "=== 基础信息 ==="
+          git --version
+          ldd --version | head -1 || true
+          nproc || true
+          free -h || true
+          df -h / || true
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Mesa 构建依赖
+        run: |
+          # glslang 提供 glslangValidator，Mesa 用它编译内置 SPIR-V 着色器
+          pacman -Syu --noconfirm --needed --disable-sandbox \
+            base-devel meson ninja \
+            python-mako python-yaml python-packaging \
+            glslang libdrm \
+            libx11 libxcb libxshmfence libxext libxxf86vm libxrandr \
+            expat zlib zstd libarchive \
+            clang pkgconf findutils
+
+      - name: 显示构建环境信息
+        run: |
+          echo "=== 编译器 ==="
+          clang --version | head -1
+          echo "=== 构建工具 ==="
+          meson --version
+          ninja --version
+          echo "=== 关键库版本 ==="
+          for p in libdrm expat zlib libzstd; do
+            printf '%-10s ' "$p"
+            pkg-config --modversion "$p" 2>/dev/null || echo "(无 pkg-config 条目)"
+          done
+          echo "=== glslangValidator ==="
+          which glslangValidator && glslangValidator --version | head -2 || echo "MISSING"
+
+      - name: 克隆 Mesa 正式版
+        run: |
+          echo "📥 克隆 Mesa 仓库..."
+          git clone https://github.com/as14725836/mesa-for-android-container.git mesa
+          cd mesa
+          git checkout adreno-main-27
+          git pull
+          echo "🧾 当前分支和提交:"
+          git branch -v
+          git log -1 --oneline --decorate
+
+      - name: 自定义品牌
+        run: |
+          echo "🔧 自定义品牌: Turnip → XmoBox turnip"
+          cd mesa
+          sed -i 's/Turnip Adreno (TM) %s%s/XmoBox turnip (TM) %s%s/' src/freedreno/vulkan/tu_device.cc
+          sed -i 's/"turnip Mesa driver"/"XmoBox turnip Driver"/' src/freedreno/vulkan/tu_device.cc
+          sed -i 's/"Mesa " PACKAGE_VERSION MESA_GIT_SHA1/"XmoBox turnip " PACKAGE_VERSION MESA_GIT_SHA1/' src/freedreno/vulkan/tu_device.cc
+          echo "--- 确认替换生效 ---"
+          grep -n 'XmoBox' src/freedreno/vulkan/tu_device.cc
+
+      - name: 构建 Mesa
+        run: |
+          cd mesa
+          BUILD_START=$(date +%s)
+
+          # 目标安装前缀：Termux glibc 环境
+          PREFIX_GLIBC=/data/data/com.termux/files/usr/glibc
+          mkdir -p "$PREFIX_GLIBC"
+
+          # 与原先 Ubuntu 方案保持一致，继续使用 clang
+          export CC=clang
+          export CXX=clang++
+
+          mkdir -p builddir
+          meson setup builddir \
+            --libdir=lib \
+            -Dprefix="$PREFIX_GLIBC" \
+            -Dbuildtype=release \
+            -Dplatforms=x11 \
+            -Degl-native-platform=x11 \
+            -Dglx=dri \
+            -Dglvnd=disabled \
+            -Dllvm=disabled \
+            -Dxlib-lease=disabled \
+            -Dlibunwind=disabled \
+            -Dvalgrind=disabled \
+            -Dgallium-drivers=zink,freedreno \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl \
+            -Dgbm=disabled \
+            -Db_ndebug=true \
+            -Dstrip=true
+
+          ninja -C builddir -j"$(nproc)"
+          ninja -C builddir install
+
+          BUILD_END=$(date +%s)
+          echo "构建耗时: $((BUILD_END - BUILD_START)) 秒"
+
+          VERSION=$(cat VERSION)
+          GIT_HASH=$(git rev-parse --short HEAD)
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "GIT_HASH=${GIT_HASH}" >> "$GITHUB_ENV"
+
+      - name: 计算发布版本号
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "🔢 计算下一个发布版本号（基于 Git 标签 + Release 实际存在性）..."
+          PREFIX="xmobox-turnip-a8xx-gen8-V"
+
+          TAG_LIST=$(git tag -l "${PREFIX}*" 2>/dev/null || true)
+          if [ -z "$TAG_LIST" ]; then
+            TAG_LIST=$(git ls-remote --tags origin "refs/tags/${PREFIX}*" 2>/dev/null | awk -F/ '{print $NF}' || true)
+          fi
+          echo "现有 Git 标签："
+          echo "${TAG_LIST:-（无）}" | sed 's/^/  - /'
+
+          # 容器内没有 gh 命令行，改用 REST API 查询 Release 列表
+          RELEASE_LIST=$(curl -sL -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+            | sed 's/.*"\([^"]*\)"$/\1/' || true)
+          echo "现存 Release："
+          echo "${RELEASE_LIST:-（无）}" | sed 's/^/  - /'
+
+          MAX_REL=0
+          for t in $RELEASE_LIST; do
+            case "$t" in ${PREFIX}*) ;; *) continue ;; esac
+            n=${t##*${PREFIX}}
+            case "$n" in ''|*[!0-9]*) continue ;; esac
+            [ "$n" -gt "$MAX_REL" ] && MAX_REL=$n
+          done
+
+          MAX_TAG=0
+          for t in $TAG_LIST; do
+            case "$t" in ${PREFIX}*) ;; *) continue ;; esac
+            n=${t##*${PREFIX}}
+            case "$n" in ''|*[!0-9]*) continue ;; esac
+            [ "$n" -gt "$MAX_TAG" ] && MAX_TAG=$n
+          done
+
+          if [ "$MAX_REL" -gt 0 ]; then
+            BASE=$MAX_REL
+            echo "基于现存 Release 最大值：V${BASE}"
+          else
+            BASE=$MAX_TAG
+            echo "无现存 Release，基于 Git 标签最大值：V${BASE}"
+          fi
+
+          NEXT=$((BASE + 1))
+          echo "TAG=${PREFIX}${NEXT}" >> "$GITHUB_ENV"
+          echo "本次版本: ${PREFIX}${NEXT}"
+
+      - name: 打包构建产物
+        run: |
+          echo "📦 开始打包 ${TAG}.tar.gz..."
+          cd mesa
+          PACK_START=$(date +%s)
+
+          TAR_NAME="${TAG}.tar.gz"
+          tar -czvf "../${TAR_NAME}" -C builddir/src/freedreno/vulkan libvulkan_freedreno.so
+
+          cd ..
+          sha256sum "${TAR_NAME}" > "${TAR_NAME}.sha256"
+
+          PACK_END=$(date +%s)
+          echo "打包耗时: $((PACK_END - PACK_START)) 秒"
+          echo "TAR_NAME=${TAR_NAME}" >> "$GITHUB_ENV"
+
+      - name: 上传构建产物到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.TAG }}
+          path: |
+            ${{ env.TAR_NAME }}
+            ${{ env.TAR_NAME }}.sha256
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          NOTES="$GITHUB_WORKSPACE/release-notes.md"
+          {
+            echo "## XmoBox Turnip A8xx Gen8 ${TAG##*-}"
+            echo
+            echo "- Mesa 版本: ${VERSION}"
+            echo "- Mesa 提交: ${GIT_HASH}"
+            echo "- 构建时间: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "- 平台: Adreno 8xx / KGSL / aarch64 (termux glibc)"
+            echo "- 构建环境: **Arch Linux ARM64** (\`menci/archlinuxarm:base-devel\`)"
+            echo
+            echo "### 本次更新"
+            git -C mesa log --oneline -12 | sed 's/^/- /'
+            echo
+            echo "### 优化"
+            echo "- 仅打包 libvulkan_freedreno.so，解压后直接覆盖 \$PREFIX/glibc/lib/libvulkan_freedreno.so"
+            echo "- 启用 GLX-DRI3 与 EGL-DRI3（x11），X11 下可直接呈现"
+            echo "- 关闭 LLVM / libunwind / valgrind / GBM / glvnd，减少运行时依赖"
+            echo "- -O3 release 构建；不启用 ThinLTO，避免额外 lld 依赖"
+            echo "- 修复 KGSL surfaceless 的 loader_funcs 赋值（此前 EGL 无法编译）"
+            echo "- 设备表补充 A830 KGSL rev0 (0x44050000)"
+            echo
+            echo "### 使用"
+            echo '```'
+            echo "tar -xzf ${TAR_NAME} -C \$PREFIX/glibc/lib"
+            echo '```'
+          } > "$NOTES"
+
+          # 容器内无 gh，改用 REST API 创建 Release 并上传资产
+          python3 - "$TAG" "$TAR_NAME" "$NOTES" <<'PYEOF'
+          import json, os, sys, urllib.request
+
+          tag, tar_name, notes_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          notes = open(notes_path, encoding="utf-8").read()
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          api = "https://api.github.com"
+
+          def call(method, url, body=None, ctype="application/json"):
+              if body is None:
+                  data = None
+              elif isinstance(body, bytes):
+                  data = body
+              else:
+                  data = json.dumps(body).encode()
+              req = urllib.request.Request(url, data=data, method=method)
+              req.add_header("Authorization", "Bearer " + token)
+              req.add_header("Accept", "application/vnd.github+json")
+              if data is not None:
+                  req.add_header("Content-Type", ctype)
+              with urllib.request.urlopen(req) as r:
+                  txt = r.read().decode()
+                  return json.loads(txt) if txt.strip() else {}
+
+          rel = call("POST", f"{api}/repos/{repo}/releases", {
+              "tag_name": tag,
+              "name": "XmoBox Turnip A8xx Gen8 " + tag.rsplit("-", 1)[-1],
+              "body": notes,
+          })
+          upload_url = rel["upload_url"].split("{")[0]
+          print("Release 已创建:", rel["html_url"])
+
+          for fn in (tar_name, tar_name + ".sha256"):
+              call("POST", f"{upload_url}?name={fn}",
+                   body=open(fn, "rb").read(),
+                   ctype="application/octet-stream")
+              print("已上传:", fn)
+          PYEOF
+
+      - name: 保存最新提交记录
+        if: ${{ needs.check-updates.outputs.latest_hash != '' }}
+        run: |
+          echo "${{ needs.check-updates.outputs.latest_hash }}" > .mesa_latest_commit
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .mesa_latest_commit || true
+          git commit -m "Update Mesa commit record" || true
+          git push || true
+
+      - name: 输出总结信息
+        run: |
+          echo "构建完成"
+          echo "版本: ${VERSION}"
+          echo "提交: ${GIT_HASH}"
+          echo "构建产物已保存到 Artifacts"
+          echo "- ${TAR_NAME}"
