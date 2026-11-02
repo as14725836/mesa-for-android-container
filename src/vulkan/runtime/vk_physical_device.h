@@ -117,6 +117,8 @@ struct vk_physical_device {
     * expensive for objects that aren't hit.
     */
    const struct vk_pipeline_cache_object_ops *const *pipeline_cache_import_ops;
+
+   uint64_t ahb_vendor_usage_compressed;
 };
 
 VK_DEFINE_HANDLE_CASTS(vk_physical_device, base, VkPhysicalDevice,

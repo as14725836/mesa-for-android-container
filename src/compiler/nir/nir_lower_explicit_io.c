@@ -1246,6 +1246,12 @@ explicit_io_offset_from_deref(nir_builder *b, nir_deref_instr *deref,
          offset = nir_amul_imm(b, index, stride);
       }
 
+      /* Keep ((index * stride) mod 2^32) >> shift: vkd3d-proton raw buffer
+       * indices rely on the 32-bit byte offset wrapping.
+       */
+      if (shift && offset_bit_size == 32)
+         offset = nir_iand_imm(b, offset, UINT32_MAX >> shift);
+
       return offset;
    }
 

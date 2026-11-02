@@ -57,6 +57,8 @@ struct tu_bo {
     * export file descriptor.
     */
    int shared_fd;
+
+   uint32_t alias_handle;
 #endif
 
    bool implicit_sync : 1;

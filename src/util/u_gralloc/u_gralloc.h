@@ -54,6 +54,7 @@ struct u_gralloc_buffer_color_info {
 enum u_gralloc_type {
    U_GRALLOC_TYPE_AUTO,
    U_GRALLOC_TYPE_GRALLOC4,
+   U_GRALLOC_TYPE_AIMAPPER,
    U_GRALLOC_TYPE_CROS,
    U_GRALLOC_TYPE_LIBDRM,
    U_GRALLOC_TYPE_QCOM,

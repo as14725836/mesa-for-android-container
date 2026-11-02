@@ -832,6 +832,8 @@ a7xx_gen1 = GPUProps(
         QCTDD08049535 = True,
         QCTDD08407086 = True,
         QCTDD08517960 = True,
+        has_early_preamble = False,
+        has_scalar_predicates = False,
     )
 
 a7xx_gen2 = GPUProps(
@@ -1418,6 +1420,7 @@ a8xx_base = GPUProps(
         round_robin_errata = False,
         max_texel_buffer_range_elements = (1 << 29) - 1,
         max_storage_buffer_range_bytes = (1 << 31) - 1,
+        cube_coord_hang_quirk = True,
 
         QCTDD10204462 = False,
         QCTDD11147232 = False,
@@ -1442,6 +1445,7 @@ a8xx_base_raw_magic_regs = [
         [A6XXRegs.REG_A6XX_RB_UNKNOWN_881D,   0x00000000],
         [A6XXRegs.REG_A6XX_RB_UNKNOWN_881E,   0x00000000],
         [A6XXRegs.REG_A7XX_RB_LRZ_CNTL2,      0x00000000],
+        [A6XXRegs.REG_A8XX_RB_RESOLVE_CR_CNTL, 0x00000001],
         [A6XXRegs.REG_A8XX_RB_RESOLVE_CNTL_5, 0x00000001],
 
         [A6XXRegs.REG_A7XX_SP_UNKNOWN_AB01,   0x00000000],
@@ -1497,6 +1501,7 @@ a8xx_gen2 = GPUProps(
 )
 
 add_gpus([
+       GPUId(chip_id=0x44010000, name="Adreno (TM) 810"),
        GPUId(chip_id=0xffff44010000, name="Adreno (TM) 810"),
     ], A6xxGPUInfo(
         CHIP.A8XX,
@@ -1507,12 +1512,34 @@ add_gpus([
             # This is possibly also needed for a830 (and all of a8xx),
             # move to a8xx_base if confirmed needed for a830.
             has_fs_tex_prefetch = False,
+            disable_gmem = True,
         )],
         num_ccu = 1,
         num_slices = 1,
         tile_align_w = 32,
         tile_align_h = 16,
         tile_max_w = 16384,
+        tile_max_h = 16384,
+        num_vsc_pipes = 32,
+        cs_shared_mem_size = 32 * 1024,
+        wave_granularity = 2,
+        fibers_per_sp = 128 * 2 * 16,
+        raw_magic_regs = a8xx_base_raw_magic_regs,
+    ))
+
+add_gpus([
+        GPUId(chip_id=0x44030000, name="Adreno (TM) 825"),
+    ], A6xxGPUInfo(
+        CHIP.A8XX,
+        [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen1, GPUProps(
+            sysmem_ccu_depth_cache_fraction = CCUColorCacheFraction.THREE_QUARTER.value,
+            sysmem_per_ccu_depth_cache_size = 96 * 1024,
+        )],
+        num_ccu = 4,
+        num_slices = 2,
+        tile_align_w = 96,
+        tile_align_h = 32,
+        tile_max_w = 16416,
         tile_max_h = 16384,
         num_vsc_pipes = 32,
         cs_shared_mem_size = 32 * 1024,
@@ -1543,6 +1570,8 @@ add_gpus([
 
 add_gpus([
         GPUId(chip_id=0xffff44030a20, name="Adreno (TM) 829"),
+        GPUId(chip_id=0x44030A00, name="Adreno (TM) 829"),
+        GPUId(chip_id=0xffff44030A00, name="Adreno (TM) 829"),
         GPUId(chip_id=0x44030a20, name="Adreno (TM) 829"), # KGSL
     ], A6xxGPUInfo(
         CHIP.A8XX,
@@ -1550,6 +1579,7 @@ add_gpus([
          GPUProps(
             shading_rate_matches_vk = True,  # TODO confirm this
             sysmem_vpc_bv_pos_buf_size = 24576,
+            disable_gmem = True,
          )],
         num_ccu = 4,
         num_slices = 2,
@@ -1566,6 +1596,8 @@ add_gpus([
 
 add_gpus([
         GPUId(chip_id=0xffff44050A31, name="Adreno (TM) 840"),
+        GPUId(chip_id=0x44051431, name="Adreno (TM) 850"), # KGSL
+        GPUId(chip_id=0x44041430, name="Adreno (TM) 845"), # KGSL
     ], A6xxGPUInfo(
         CHIP.A8XX,
         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,

@@ -1473,7 +1473,6 @@ else
   _trial_msvc = [
     '-Werror=pointer-arith',
     '-Werror=vla',
-    '-Werror=gnu-empty-initializer',
     '-Wgnu-pointer-arith',
   ]
   c_msvc_compat_args += cc.get_supported_arguments(_trial_msvc)

@@ -1062,7 +1062,7 @@ struct tu_autotune::rp_history {
          /* Drawcalls access GMEM in GMEM rendering, but we do not want to ignore them completely.  The state changes
           * between tiles also have an overhead.  The magic numbers of 11 and 10 are randomly chosen.
           */
-         gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
+         gmem_bandwidth = (gmem_bandwidth * 10 + total_draw_call_bandwidth) / 10;
 
          bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
          render_mode mode = select_sysmem ? render_mode::SYSMEM : render_mode::GMEM;

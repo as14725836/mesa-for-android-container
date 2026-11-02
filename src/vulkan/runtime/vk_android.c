@@ -214,9 +214,9 @@ vk_android_import_anb_memory(struct vk_device *device,
                              const VkNativeBufferANDROID *anb,
                              const VkAllocationCallbacks *alloc)
 {
-   assert(anb && anb->handle && anb->handle->numFds > 0);
+   assert(anb && anb->handle && ((const native_handle_t *)anb->handle)->numFds > 0);
 
-   int dma_buf_fd = anb->handle->data[0];
+   int dma_buf_fd = ((const native_handle_t *)anb->handle)->data[0];
 
    /* Query image memory requirements for size and supported memory types */
    VkMemoryRequirements mem_reqs;
@@ -1346,8 +1346,15 @@ vk_android_get_ahb_image_properties(
 
    ahb_usage_props =
       vk_find_struct(props->pNext, ANDROID_HARDWARE_BUFFER_USAGE_ANDROID);
-   if (ahb_usage_props)
-      ahb_usage_props->androidHardwareBufferUsage = ahb_usage;
+   if (ahb_usage_props) {
+      uint64_t alloc_usage = ahb_usage;
+
+      if (!(alloc_usage & (AHARDWAREBUFFER_USAGE_CPU_READ_MASK |
+                           AHARDWAREBUFFER_USAGE_CPU_WRITE_MASK)))
+         alloc_usage |= pdevice->ahb_vendor_usage_compressed;
+
+      ahb_usage_props->androidHardwareBufferUsage = alloc_usage;
+   }
 
    return VK_SUCCESS;
 }

@@ -53,6 +53,14 @@ emit_load_state(struct tu_cs *cs, unsigned opcode, enum a6xx_state_type st,
    tu_cs_emit_qw(cs, offset | (base << 28));
 }
 
+static VkShaderStageFlags
+load_state_stages(const struct tu_pipeline *pipeline,
+                  const struct tu_descriptor_set_binding_layout *binding)
+{
+   return pipeline->active_stages & binding->shader_stages &
+          ~(VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT);
+}
+
 static unsigned
 tu6_load_state_size(struct tu_pipeline *pipeline,
                     struct tu_pipeline_layout *layout)
@@ -68,7 +76,7 @@ tu6_load_state_size(struct tu_pipeline *pipeline,
          struct tu_descriptor_set_binding_layout *binding = &set_layout->binding[j];
          unsigned count = 0;
          /* See comment in tu6_emit_load_state(). */
-         VkShaderStageFlags stages = pipeline->active_stages & binding->shader_stages;
+         VkShaderStageFlags stages = load_state_stages(pipeline, binding);
          unsigned stage_count = util_bitcount(stages);
 
          if (!binding->array_size)
@@ -155,7 +163,7 @@ tu6_emit_load_state(struct tu_device *device,
           * stages aren't present in a used pipeline.  We don't want to emit
           * loads for unused descriptors.
           */
-         VkShaderStageFlags stages = pipeline->active_stages & binding->shader_stages;
+         VkShaderStageFlags stages = load_state_stages(pipeline, binding);
          unsigned count = binding->array_size;
 
          /* If this is a variable-count descriptor, then the array_size is an
@@ -409,7 +417,7 @@ tu6_emit_xs_config(struct tu_crb &crb, struct tu_shader_stages stages)
 }
 TU_GENX(tu6_emit_xs_config);
 
-static void
+void
 tu6_emit_dynamic_offset(struct tu_cs *cs,
                         const struct ir3_shader_variant *xs,
                         const struct tu_shader *shader,
@@ -1572,7 +1580,7 @@ tu_hash_shaders(unsigned char *hash,
    if (layout)
       _mesa_blake3_update(&ctx, layout->blake3, sizeof(layout->blake3));
 
-   for (int i = 0; i < MESA_SHADER_STAGES; ++i) {
+   for (int i = 0; i < MESA_SHADER_MESH_STAGES; ++i) {
       if (stages[i] || nir[i]) {
          tu_hash_stage(&ctx, pipeline_flags, stages[i], nir[i], &keys[i]);
       }
@@ -1746,13 +1754,13 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
                                     struct tu_pipeline *pipeline)
 {
    VkResult result = VK_SUCCESS;
-   const VkPipelineShaderStageCreateInfo *stage_infos[MESA_SHADER_STAGES] = {
+   const VkPipelineShaderStageCreateInfo *stage_infos[MESA_SHADER_MESH_STAGES] = {
       NULL
    };
    VkPipelineCreationFeedback pipeline_feedback = {
       .flags = VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT,
    };
-   VkPipelineCreationFeedback stage_feedbacks[MESA_SHADER_STAGES] = { 0 };
+   VkPipelineCreationFeedback stage_feedbacks[MESA_SHADER_MESH_STAGES] = { 0 };
 
    const bool executable_info =
       builder->create_flags &
@@ -1763,6 +1771,12 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
       VK_PIPELINE_CREATE_2_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
 
    int64_t pipeline_start = os_time_get_nano();
+
+   if (builder->active_stages & VK_SHADER_STAGE_MESH_BIT_EXT) {
+      result = tu_init_mesh_shading(builder->device);
+      if (result != VK_SUCCESS)
+         return result;
+   }
 
    const VkPipelineCreationFeedbackCreateInfo *creation_feedback =
       vk_find_struct_const(builder->create_info->pNext, PIPELINE_CREATION_FEEDBACK_CREATE_INFO);
@@ -1974,9 +1988,11 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
       unsigned char shader_blake3[BLAKE3_KEY_LEN + 1];
       memcpy(shader_blake3, pipeline_blake3, sizeof(pipeline_blake3));
 
+      bool has_mesh = stage_infos[MESA_SHADER_MESH] || nir[MESA_SHADER_MESH];
       for (mesa_shader_stage stage = MESA_SHADER_VERTEX; stage < ARRAY_SIZE(nir);
            stage = static_cast<mesa_shader_stage>(stage + 1)) {
-         if (stage_infos[stage] || nir[stage]) {
+         if (stage_infos[stage] || nir[stage] ||
+             (stage == MESA_SHADER_VERTEX && has_mesh)) {
             bool shader_application_cache_hit;
             shader_blake3[BLAKE3_KEY_LEN] = static_cast<unsigned char>(stage);
             shaders[stage] =
@@ -3306,7 +3322,7 @@ tu6_blend_size(struct tu_device *dev,
 {
    unsigned num_rts = alpha_to_coverage_enable ?
       MAX2(cb->attachment_count, 1) : cb->attachment_count;
-   return 8 + 5 * num_rts;
+   return 8 + (CHIP >= A8XX ? 2 : 0) + 5 * num_rts;
 }
 
 template <chip CHIP>
@@ -3375,6 +3391,7 @@ tu6_emit_blend(struct tu_cs *cs,
                                           .sample_mask = sample_mask));
 
    unsigned num_remapped_rts = 0;
+   uint32_t lrz_color_comp_mask = 0;
    for (unsigned i = 0; i < num_rts; i++) {
       if (cal->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
          continue;
@@ -3382,6 +3399,8 @@ tu6_emit_blend(struct tu_cs *cs,
       num_remapped_rts = MAX2(num_remapped_rts, remapped_idx + 1);
       const struct vk_color_blend_attachment_state *att = &cb->attachments[i];
       if ((cb->color_write_enables & (1u << i)) && i < cb->attachment_count) {
+         if (CHIP >= A8XX && remapped_idx < 8)
+            lrz_color_comp_mask |= (att->write_mask & 0xf) << (remapped_idx * 4);
          const enum a3xx_rb_blend_opcode color_op = tu6_blend_op(att->color_blend_op);
          const enum adreno_rb_blend_factor src_color_factor =
             tu6_blend_factor(static_cast<VkBlendFactor>(att->src_color_blend_factor));
@@ -3434,6 +3453,8 @@ tu6_emit_blend(struct tu_cs *cs,
    }
    tu_cs_emit_regs(cs, A6XX_SP_PS_MRT_CNTL(.mrt = num_remapped_rts));
    tu_cs_emit_regs(cs, A6XX_RB_PS_MRT_CNTL(.mrt = num_remapped_rts));
+   if (CHIP >= A8XX)
+      tu_cs_emit_regs(cs, GRAS_LRZ_COLOR_COMP_MASK(CHIP, .dword = lrz_color_comp_mask));
 }
 
 static const enum mesa_vk_dynamic_graphics_state tu_blend_constants_state[] = {

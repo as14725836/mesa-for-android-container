@@ -196,6 +196,13 @@ is_kgsl(struct tu_instance *instance)
    return strcmp(instance->knl->name, "kgsl") == 0;
 }
 
+static bool
+tu_has_mesh_shader(const struct tu_physical_device *device)
+{
+   return device->info->chip >= 7 &&
+          device->info->cs_shared_mem_size >= 32 * 1024;
+}
+
 static uint32_t
 tu_subgroup_size(const struct tu_physical_device *device)
 {
@@ -223,7 +230,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_acceleration_structure = has_raytracing,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
-      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter,
+      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter && device->instance->knl->device_get_gpu_timestamp != NULL,
       .KHR_compute_shader_derivatives = true,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
@@ -320,7 +327,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_border_color_swizzle = true,
-      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter,
+      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter && device->instance->knl->device_get_gpu_timestamp != NULL,
       .EXT_color_write_enable = true,
       .EXT_conditional_rendering = true,
       .EXT_conservative_rasterization = device->info->chip >= 7,
@@ -368,16 +375,17 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_load_store_op_none = true,
       .EXT_map_memory_placed = true,
       .EXT_memory_budget = true,
+      .EXT_mesh_shader = tu_has_mesh_shader(device),
       .EXT_multi_draw = true,
       .EXT_multisampled_render_to_single_sampled = true,
       .EXT_mutable_descriptor_type = true,
       .EXT_nested_command_buffer = true,
       .EXT_non_seamless_cube_map = true,
-      .EXT_physical_device_drm = !is_kgsl(device->instance),
+      .EXT_physical_device_drm = !is_kgsl(device->instance) || device->has_local,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
 #ifdef TU_USE_WSI_PLATFORM
-      .EXT_present_timing = device->info->props.has_persistent_counter,
+      .EXT_present_timing = device->info->props.has_persistent_counter && device->instance->knl->device_get_gpu_timestamp != NULL,
 #endif
       .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
@@ -820,6 +828,12 @@ tu_get_features(struct tu_physical_device *pdevice,
    features->memoryMapRangePlaced = false;
    features->memoryUnmapReserve = true;
 
+   features->taskShader = tu_has_mesh_shader(pdevice);
+   features->meshShader = tu_has_mesh_shader(pdevice);
+   features->multiviewMeshShader = false;
+   features->primitiveFragmentShadingRateMeshShader = false;
+   features->meshShaderQueries = false;
+
    /* VK_EXT_multi_draw */
    features->multiDraw = true;
 
@@ -954,9 +968,9 @@ tu_get_features(struct tu_physical_device *pdevice,
 
 #ifdef TU_USE_WSI_PLATFORM
    /* VK_EXT_present_timing */
-   features->presentTiming = true;
-   features->presentAtRelativeTime = true;
-   features->presentAtAbsoluteTime = true;
+   features->presentTiming = pdevice->vk.supported_extensions.EXT_present_timing;
+   features->presentAtRelativeTime = pdevice->vk.supported_extensions.EXT_present_timing;
+   features->presentAtAbsoluteTime = pdevice->vk.supported_extensions.EXT_present_timing;
 #endif
 
    /* VALVE_buffer_device_address_allocation_alignment */
@@ -984,6 +998,10 @@ tu_get_physical_device_properties_1_1(struct tu_physical_device *pdevice,
                                     VK_SUBGROUP_FEATURE_ROTATE_CLUSTERED_BIT_KHR |
                                     VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
                                     VK_SUBGROUP_FEATURE_ARITHMETIC_BIT;
+   if (tu_has_mesh_shader(pdevice)) {
+      p->subgroupSupportedStages |=
+         VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+   }
    if (pdevice->info->props.has_getfiberid) {
       p->subgroupSupportedStages |= VK_SHADER_STAGE_ALL_GRAPHICS;
       p->subgroupSupportedOperations |= VK_SUBGROUP_FEATURE_QUAD_BIT;
@@ -1120,7 +1138,8 @@ tu_get_physical_device_properties_1_3(struct tu_physical_device *pdevice,
    p->requiredSubgroupSizeStages =
       p->minSubgroupSize == p->maxSubgroupSize
          ? VK_SHADER_STAGE_ALL
-         : (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+         : (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+            VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT);
 
    p->maxInlineUniformBlockSize = MAX_INLINE_UBO_RANGE;
    p->maxPerStageDescriptorInlineUniformBlocks = MAX_INLINE_UBOS;
@@ -1452,6 +1471,43 @@ tu_get_properties(struct tu_physical_device *pdevice,
    /* VK_EXT_map_memory_placed */
    os_get_page_size(&os_page_size);
    props->minPlacedMemoryMapAlignment = os_page_size;
+
+   props->maxTaskWorkGroupTotalCount = 1u << 22;
+   props->maxTaskWorkGroupCount[0] = 65535;
+   props->maxTaskWorkGroupCount[1] = 65535;
+   props->maxTaskWorkGroupCount[2] = 65535;
+   props->maxTaskWorkGroupInvocations = 128;
+   props->maxTaskWorkGroupSize[0] = 128;
+   props->maxTaskWorkGroupSize[1] = 128;
+   props->maxTaskWorkGroupSize[2] = 128;
+   props->maxTaskPayloadSize = 16384;
+   props->maxTaskSharedMemorySize = 32768;
+   props->maxTaskPayloadAndSharedMemorySize = 32768;
+   props->maxMeshWorkGroupTotalCount = 1u << 22;
+   props->maxMeshWorkGroupCount[0] = 65535;
+   props->maxMeshWorkGroupCount[1] = 65535;
+   props->maxMeshWorkGroupCount[2] = 65535;
+   props->maxMeshWorkGroupInvocations = 128;
+   props->maxMeshWorkGroupSize[0] = 128;
+   props->maxMeshWorkGroupSize[1] = 128;
+   props->maxMeshWorkGroupSize[2] = 128;
+   props->maxMeshSharedMemorySize = 28672;
+   props->maxMeshPayloadAndSharedMemorySize = 16384 + 28672;
+   props->maxMeshOutputMemorySize = 32768;
+   props->maxMeshPayloadAndOutputMemorySize = 16384 + 32768;
+   props->maxMeshOutputComponents = 128;
+   props->maxMeshOutputVertices = 256;
+   props->maxMeshOutputPrimitives = 256;
+   props->maxMeshOutputLayers = 8;
+   props->maxMeshMultiviewViewCount = 1;
+   props->meshOutputPerVertexGranularity = 1;
+   props->meshOutputPerPrimitiveGranularity = 1;
+   props->maxPreferredTaskWorkGroupInvocations = 64;
+   props->maxPreferredMeshWorkGroupInvocations = 128;
+   props->prefersLocalInvocationVertexOutput = true;
+   props->prefersLocalInvocationPrimitiveOutput = true;
+   props->prefersCompactVertexOutput = true;
+   props->prefersCompactPrimitiveOutput = true;
 
    /* VK_EXT_multi_draw */
    props->maxMultiDrawCount = 2048;
@@ -1865,6 +1921,7 @@ tu_physical_device_init(struct tu_physical_device *device,
    tu_get_properties(device, &device->vk.properties);
 
    device->vk.supported_sync_types = device->sync_types;
+   device->vk.ahb_vendor_usage_compressed = 0x10000000ull;
 
    device->queue_families[device->num_queue_families++] =
       (struct tu_queue_family) {
@@ -2168,6 +2225,8 @@ tu_get_system_heap_size(struct tu_physical_device *physical_device)
    return available_ram;
 }
 
+static uint64_t tu_process_heap_used;
+
 static inline VkDeviceSize
 tu_get_budget_memory(struct tu_physical_device *physical_device, uint64_t heap_used)
 {
@@ -2209,7 +2268,7 @@ tu_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice pdev,
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
          VkPhysicalDeviceMemoryBudgetPropertiesEXT *memory_budget_props =
             static_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT *>(ext);
-         memory_budget_props->heapUsage[0] = p_atomic_read(&physical_device->heap.used);
+         memory_budget_props->heapUsage[0] = p_atomic_read(&tu_process_heap_used);
          memory_budget_props->heapBudget[0] = tu_get_budget_memory(physical_device, memory_budget_props->heapUsage[0]);
 
          /* The heapBudget and heapUsage values must be zero for array elements
@@ -3401,6 +3460,11 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    tu_destroy_empty_shaders(device);
 
+   if (device->mesh_setup)
+      vk_pipeline_cache_object_unref(&device->vk, &device->mesh_setup->base);
+   if (device->mesh_ring)
+      tu_bo_finish(device, device->mesh_ring);
+
    tu_destroy_dynamic_rendering(device);
 
    vk_meta_device_finish(&device->vk, &device->meta);
@@ -3582,6 +3646,7 @@ tu_add_to_heap(struct tu_device *dev, struct tu_bo *bo)
       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                        "Out of heap memory");
    }
+   p_atomic_add(&tu_process_heap_used, bo->size);
    return VK_SUCCESS;
 }
 
@@ -3671,6 +3736,7 @@ _tu_destroy_memory(struct tu_device *device,
 {
    if (mem->bo) {
       p_atomic_add(&device->physical_device->heap.used, -mem->bo->size);
+      p_atomic_add(&tu_process_heap_used, -mem->bo->size);
       tu_bo_finish(device, mem->bo);
    }
 

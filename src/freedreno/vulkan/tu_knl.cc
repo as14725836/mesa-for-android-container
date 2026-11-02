@@ -249,6 +249,8 @@ int
 tu_device_get_gpu_timestamp(struct tu_device *dev,
                             uint64_t *ts)
 {
+   if (dev->instance->knl->device_get_gpu_timestamp == NULL)
+      return -1;
    return dev->instance->knl->device_get_gpu_timestamp(dev, ts);
 }
 

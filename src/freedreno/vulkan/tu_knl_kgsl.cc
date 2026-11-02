@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #define __user
 #include "ion/ion.h"
@@ -48,12 +50,33 @@ safe_ioctl(int fd, unsigned long request, void *arg)
 }
 
 static int
+dd_set_pwr_max_constraint(int fd, uint32_t context_id)
+{
+   struct kgsl_device_constraint_pwrlevel pwrlevel = {
+      .level = KGSL_CONSTRAINT_PWR_MAX,
+   };
+   struct kgsl_device_constraint constraint = {
+      .type = KGSL_CONSTRAINT_PWRLEVEL,
+      .context_id = context_id,
+      .data = (void *)&pwrlevel,
+      .size = sizeof(pwrlevel),
+   };
+   struct kgsl_device_getproperty prop = {
+      .type = KGSL_PROP_PWR_CONSTRAINT,
+      .value = (void *)&constraint,
+      .sizebytes = sizeof(constraint),
+   };
+
+   return safe_ioctl(fd, IOCTL_KGSL_SETPROPERTY, &prop);
+}
+
+static int
 kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
 {
    struct kgsl_drawctxt_create req = {
       .flags = KGSL_CONTEXT_SAVE_GMEM |
               KGSL_CONTEXT_NO_GMEM_ALLOC |
-              KGSL_CONTEXT_PREAMBLE,
+              KGSL_CONTEXT_PREAMBLE | KGSL_CONTEXT_PWR_CONSTRAINT,
    };
 
    int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
@@ -61,6 +84,9 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
       return ret;
 
    queue->msm_queue_id = req.drawctxt_id;
+
+   if (dd_set_pwr_max_constraint(dev->physical_device->local_fd, req.drawctxt_id))
+      mesa_logw("DD-Turnip: Failed to set initial PWR_MAX constraint: %s", strerror(errno));
 
    return 0;
 }
@@ -282,6 +308,91 @@ kgsl_align_flag(uint64_t align)
    return 0;
 }
 
+static bool
+kgsl_bo_needs_alias(struct tu_device *dev, enum tu_bo_alloc_flags flags)
+{
+   return (flags & TU_BO_ALLOC_NO_32B_ROLLOVER) &&
+          dev->physical_device->has_sparse &&
+          dev->physical_device->info->chip >= A8XX;
+}
+
+static VkResult
+kgsl_bo_create_alias(struct tu_device *dev, struct tu_bo *bo, uint64_t align)
+{
+   int fd = dev->physical_device->local_fd;
+
+   struct kgsl_gpuobj_alloc alloc = {
+      .size = bo->size,
+      .flags = KGSL_MEMFLAGS_VBO | KGSL_MEMFLAGS_VBO_NO_MAP_ZERO |
+               kgsl_align_flag(align),
+   };
+
+   if (safe_ioctl(fd, IOCTL_KGSL_GPUOBJ_ALLOC, &alloc)) {
+      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                       "GPUOBJ_ALLOC failed (%s)", strerror(errno));
+   }
+
+   struct kgsl_gpumem_get_info info = {
+      .id = alloc.id,
+   };
+
+   struct kgsl_gpumem_bind_range range = {
+      .length = bo->size,
+      .child_id = bo->gem_handle,
+      .op = KGSL_GPUMEM_RANGE_OP_BIND,
+   };
+
+   struct kgsl_gpumem_bind_ranges bind = {
+      .ranges = (uint64_t)(uintptr_t)&range,
+      .ranges_nents = 1,
+      .ranges_size = sizeof(range),
+      .id = alloc.id,
+   };
+
+   if (safe_ioctl(fd, IOCTL_KGSL_GPUMEM_GET_INFO, &info) ||
+       safe_ioctl(fd, IOCTL_KGSL_GPUMEM_BIND_RANGES, &bind)) {
+      VkResult result =
+         vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                   "binding IB alias failed (%s)", strerror(errno));
+
+      struct kgsl_gpumem_free_id req = {
+         .id = alloc.id,
+      };
+      safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
+      return result;
+   }
+
+   bo->alias_handle = alloc.id;
+   bo->iova = info.gpuaddr;
+   return VK_SUCCESS;
+}
+
+static void
+kgsl_bo_destroy_alias(struct tu_device *dev, struct tu_bo *bo)
+{
+   int fd = dev->physical_device->local_fd;
+
+   struct kgsl_gpumem_bind_range range = {
+      .length = bo->size,
+      .child_id = bo->gem_handle,
+      .op = KGSL_GPUMEM_RANGE_OP_UNBIND,
+   };
+
+   struct kgsl_gpumem_bind_ranges unbind = {
+      .ranges = (uint64_t)(uintptr_t)&range,
+      .ranges_nents = 1,
+      .ranges_size = sizeof(range),
+      .id = bo->alias_handle,
+   };
+
+   safe_ioctl(fd, IOCTL_KGSL_GPUMEM_BIND_RANGES, &unbind);
+
+   struct kgsl_gpumem_free_id req = {
+      .id = bo->alias_handle,
+   };
+   safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
+}
+
 static VkResult
 kgsl_bo_init(struct tu_device *dev,
              struct vk_object_base *base,
@@ -373,6 +484,10 @@ kgsl_bo_init(struct tu_device *dev,
       result = kgsl_sparse_vma_map(dev, lazy_vma, bo, 0);
    } else if (flags & TU_BO_ALLOC_REPLAYABLE) {
       result = kgsl_bo_user_map(dev, bo, client_iova);
+   } else if (kgsl_bo_needs_alias(dev, flags)) {
+      result = kgsl_bo_create_alias(dev, bo, align);
+      if (result != VK_SUCCESS)
+         kgsl_bo_finish(dev, bo);
    }
 
    if (result != VK_SUCCESS)
@@ -515,6 +630,9 @@ kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       close(bo->shared_fd);
 
    TU_RMV(bo_destroy, dev, bo);
+
+   if (bo->alias_handle)
+      kgsl_bo_destroy_alias(dev, bo);
 
    struct kgsl_gpumem_free_id req = {
       .id = bo->gem_handle
@@ -1673,7 +1791,7 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
 
    if (submit->bind_cmds.size == 0) {
       struct kgsl_gpu_command req = {
-         .flags = KGSL_CMDBATCH_SUBMIT_IB_LIST,
+         .flags = KGSL_CMDBATCH_SUBMIT_IB_LIST | KGSL_CMDBATCH_PWR_CONSTRAINT,
          .cmdlist = reinterpret_cast<uintptr_t>(submit->commands.data),
          .cmdsize = sizeof(struct kgsl_command_object),
          .numcmds = util_dynarray_num_elements(&submit->commands,
@@ -1702,6 +1820,13 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
          result = vk_device_set_lost(&queue->device->vk, "submit failed: %s\n", strerror(error));
          goto fail_submit;
       }
+      static uint32_t pwr_refresh_counter = 0;
+      uint32_t count = p_atomic_inc_return(&pwr_refresh_counter);
+      if (count % 1000 == 0 &&
+          dd_set_pwr_max_constraint(queue->device->physical_device->local_fd,
+                                    queue->msm_queue_id))
+         mesa_logw("DD-Turnip: PWR_MAX refresh failed at submission %u: %s", count, strerror(errno));
+
       timestamp = req.timestamp;
    } else {
       /* kgsl doesn't support multiple bind commands at once */
@@ -1824,13 +1949,6 @@ kgsl_device_finish(struct tu_device *dev)
 }
 
 static int
-kgsl_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
-{
-   UNREACHABLE("");
-   return 0;
-}
-
-static int
 kgsl_device_get_suspend_count(struct tu_device *dev, uint64_t *suspend_count)
 {
    /* kgsl doesn't have a way to get it */
@@ -1874,7 +1992,6 @@ static const struct tu_knl kgsl_knl_funcs = {
 
       .device_init = kgsl_device_init,
       .device_finish = kgsl_device_finish,
-      .device_get_gpu_timestamp = kgsl_device_get_gpu_timestamp,
       .device_get_suspend_count = kgsl_device_get_suspend_count,
       .device_check_status = kgsl_device_check_status,
       .submitqueue_new = kgsl_submitqueue_new,
@@ -2068,6 +2185,13 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
    }
 
    instance->knl = &kgsl_knl_funcs;
+
+   struct stat kgsl_st;
+   if (fstat(fd, &kgsl_st) == 0 && S_ISCHR(kgsl_st.st_mode)) {
+      device->has_local = device->has_master = true;
+      device->local_major = device->master_major = major(kgsl_st.st_rdev);
+      device->local_minor = device->master_minor = minor(kgsl_st.st_rdev);
+   }
 
    result = tu_physical_device_init(device, instance);
    if (result != VK_SUCCESS)

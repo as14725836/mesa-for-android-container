@@ -320,6 +320,7 @@ struct tu_render_pass_state
 {
    bool xfb_used;
    bool has_tess;
+   bool has_mesh;
    bool has_prim_generated_query_in_rp;
    bool has_vtx_stats_query_in_rp;
    bool has_zpass_done_sample_count_write_in_rp;
@@ -494,7 +495,7 @@ struct tu_cmd_state
 {
    uint32_t dirty;
 
-   struct tu_shader *shaders[MESA_SHADER_STAGES];
+   struct tu_shader *shaders[MESA_SHADER_MESH_STAGES];
 
    struct tu_program_state program;
 
@@ -616,6 +617,9 @@ struct tu_cmd_state
    bool fdm_custom_resolve_subsampled;
 
    bool tessfactor_addr_set;
+
+   bool compute_program_stale;
+
    bool predication_active;
    bool msaa_disable;
    tu_lrz_blend_status lrz_blend_status;

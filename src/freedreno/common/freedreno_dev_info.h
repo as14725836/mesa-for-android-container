@@ -487,6 +487,7 @@ struct fd_dev_info {
 
       /* Whether the device supports the image processing opcode */
       bool has_image_processing;
+      bool disable_gmem;
 
       /* The amount of valid draw state IDs. */
       uint32_t max_draw_states;
@@ -508,6 +509,8 @@ struct fd_dev_info {
 
       /* On a750+ SUBPASS_FENCE also implicitly does CCU_RESOLVE_CLEAN */
       bool subpass_fence_cleans_resolve;
+
+      bool cube_coord_hang_quirk;
    } props;
 
 #define FD_QUIRK(info, name) (info)->quirks.name

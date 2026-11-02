@@ -2108,6 +2108,9 @@ ir3_supports_rpt(struct ir3_compiler *compiler, unsigned opc)
    case 3:
       return opc != OPC_DP2ACC && opc != OPC_DP4ACC;
    case 4:
+      if (compiler->dev_id->chip_id == UINT64_C(0x44041430) ||
+          compiler->dev_id->chip_id == UINT64_C(0x44051431))
+         return false;
       return opc != OPC_RCP;
    default:
       return false;
