@@ -358,6 +358,12 @@ struct fd_context {
     */
    struct pipe_fence_handle *last_fence dt;
 
+   /* The next context flush exports the render-completion fence directly to
+    * the window-system presentation path.
+    */
+   bool explicit_present_fence;
+   bool disable_present_wait_fence;
+
    /*
     * Counter to keep track of batch's most recent update.  Ie. the batch with
     * the higher update count is the one that has been drawn/etc to the most

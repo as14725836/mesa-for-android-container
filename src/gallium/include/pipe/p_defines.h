@@ -1265,6 +1265,17 @@ enum pipe_context_param
     */
    PIPE_CONTEXT_PARAM_UPDATE_THREAD_SCHEDULING,
 
+   /* The next flush is used as an explicit presentation fence.  Drivers may
+    * use this to avoid implicit-sync fallbacks while the frontend requests a
+    * native fence from the same submission.
+    */
+   PIPE_CONTEXT_PARAM_EXPLICIT_PRESENT_FENCE,
+
+   /* Compatibility policy for window-system presentation. Disable only the
+    * driver's additional CPU completion wait, not submission or API fences.
+    */
+   PIPE_CONTEXT_PARAM_DISABLE_PRESENT_WAIT_FENCE,
+
    /* The minification/magnification switch-over point, the constant c of the
     * GL and ES specs. Value 1 selects c = 0.5, value 0 selects c = 0.
     *
