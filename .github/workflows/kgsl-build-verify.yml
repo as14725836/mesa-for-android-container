@@ -6,7 +6,7 @@ on:
       ref:
         description: '要编译的分支或提交'
         required: false
-        default: 'integration/kgsl-gl'
+        default: 'adreno-main-27'
         type: string
 
 permissions:
