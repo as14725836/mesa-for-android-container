@@ -568,6 +568,14 @@ fd_bo_dmabuf(struct fd_bo *bo)
    if (suballoc_bo(bo))
       return -1;
 
+   if (bo->funcs->sync_to_gpu) {
+      ret = bo->funcs->sync_to_gpu(bo);
+      if (ret < 0) {
+         ERROR_MSG("failed to sync bo to gpu before export: %d", ret);
+         return ret;
+      }
+   }
+
    ret = bo->funcs->dmabuf(bo);
    if (ret < 0) {
       ERROR_MSG("failed to get dmabuf fd: %d", ret);

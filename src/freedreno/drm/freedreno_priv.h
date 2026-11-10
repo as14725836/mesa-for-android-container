@@ -188,9 +188,11 @@ submit_offset(struct fd_bo *bo, uint32_t offset)
 }
 
 struct fd_device {
-   int fd;
+   int fd;          /* GPU submission fd (kgsl GPU node on the kgsl stack) */
+   int control_fd;  /* screen-cache / DRI3 identity fd; == fd unless redirected */
    enum fd_version version;
    int32_t refcnt;
+   uint32_t features;   /* backends may set FD_FEATURE_* flags here */
 
    /* tables to keep track of bo's, to avoid "evil-twin" fd_bo objects:
     *
@@ -310,6 +312,7 @@ struct fd_pipe_funcs {
                     uint64_t value);
    int (*wait)(struct fd_pipe *pipe, const struct fd_fence *fence,
                uint64_t timeout);
+   int (*reset_status)(struct fd_pipe *pipe, enum fd_reset_status *status);
    void (*destroy)(struct fd_pipe *pipe);
 };
 
@@ -421,6 +424,11 @@ struct fd_bo_funcs {
    uint64_t (*iova)(struct fd_bo *bo);
    void (*set_name)(struct fd_bo *bo, const char *fmt, va_list ap);
    int (*dmabuf)(struct fd_bo *bo);
+   /* Optional: flush CPU caches for a buffer that is about to be handed to a
+    * foreign GPU consumer via dma-buf export.  Backends whose kernel driver is
+    * not told about the import chain (i.e. KGSL) use this to make sure the
+    * exporter's writes are visible to the importer. */
+   int (*sync_to_gpu)(struct fd_bo *bo);
 
    /**
     * Optional hook that is called before ->destroy().  In the case of
