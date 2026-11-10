@@ -27,6 +27,8 @@ jobs:
       - name: 安装 git
         run: |
           pacman -Syu --noconfirm --needed --disable-sandbox git
+          # 容器内 root 与 checkout 文件属主不同，避免 git 报 dubious ownership
+          git config --global --add safe.directory '*'
 
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -47,8 +49,11 @@ jobs:
       - name: 显示构建环境信息
         run: |
           echo "=== 分支 / 提交 ==="
-          git branch -v
-          git log -3 --oneline --decorate
+          git config --global --add safe.directory '*'
+          git branch -v || true
+          git log -3 --oneline --decorate || true
+          echo "=== KGSL 关键文件确认 ==="
+          ls -l src/freedreno/drm/kgsl/ 2>&1 || true
           echo "=== 编译器 ==="
           clang --version | head -1
           echo "=== 构建工具 ==="
