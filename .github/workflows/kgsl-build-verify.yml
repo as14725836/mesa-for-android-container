@@ -1,0 +1,111 @@
+name: KGSL 集成编译验证
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要编译的分支或提交'
+        required: false
+        default: 'integration/kgsl-gl'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    container:
+      image: menci/archlinuxarm:base-devel
+      # pacman 7.x 的 Landlock 沙箱在容器内无法生效，需要特权模式
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 安装 git
+        run: |
+          pacman -Syu --noconfirm --needed --disable-sandbox git
+
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: 安装 Mesa 构建依赖
+        run: |
+          pacman -Syu --noconfirm --needed --disable-sandbox \
+            base-devel meson ninja \
+            python-mako python-yaml python-packaging \
+            glslang libdrm \
+            libx11 libxcb libxshmfence libxext libxxf86vm libxrandr \
+            expat zlib zstd libarchive \
+            clang pkgconf findutils
+
+      - name: 显示构建环境信息
+        run: |
+          echo "=== 分支 / 提交 ==="
+          git branch -v
+          git log -3 --oneline --decorate
+          echo "=== 编译器 ==="
+          clang --version | head -1
+          echo "=== 构建工具 ==="
+          meson --version
+          ninja --version
+          echo "=== glslangValidator ==="
+          which glslangValidator && glslangValidator --version | head -2 || echo "MISSING"
+
+      - name: 配置 Mesa (与 turnip-build 相同选项)
+        run: |
+          export CC=clang
+          export CXX=clang++
+          PREFIX_GLIBC=/data/data/com.termux/files/usr/glibc
+          mkdir -p "$PREFIX_GLIBC"
+
+          meson setup builddir \
+            --libdir=lib \
+            -Dprefix="$PREFIX_GLIBC" \
+            -Dbuildtype=release \
+            -Dplatforms=x11 \
+            -Degl-native-platform=x11 \
+            -Dglx=dri \
+            -Dglvnd=disabled \
+            -Dllvm=disabled \
+            -Dxlib-lease=disabled \
+            -Dlibunwind=disabled \
+            -Dvalgrind=disabled \
+            -Dgallium-drivers=zink,freedreno \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl \
+            -Dgbm=disabled \
+            -Db_ndebug=true \
+            -Dstrip=true
+
+      - name: 编译
+        run: |
+          export CC=clang
+          export CXX=clang++
+          ninja -C builddir -j"$(nproc)" 2>&1 | tee build.log
+          echo "=== 构建结果 ==="
+          tail -30 build.log
+
+      - name: 确认 KGSL 后端产物
+        run: |
+          echo "=== KGSL 对象文件 ==="
+          ar t builddir/src/freedreno/drm/libfreedreno_drm.a | grep kgsl || true
+          echo "=== 关键 DRI/EGL 产物 ==="
+          ls -lh builddir/src/gallium/targets/dri/libgallium-*.so \
+                 builddir/src/egl/libEGL.so* \
+                 builddir/src/freedreno/vulkan/libvulkan_freedreno.so 2>&1 || true
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kgsl-build-log
+          path: |
+            build.log
+            builddir/meson-logs/meson-log.txt
+          if-no-files-found: ignore
