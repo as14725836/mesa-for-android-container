@@ -431,7 +431,7 @@ msm_get_iova(struct tu_device *dev,
 static VkResult
 tu_map_vm_bind(struct tu_device *dev, uint32_t map_op, uint32_t map_op_flags,
                uint64_t iova, uint32_t gem_handle, uint64_t bo_offset,
-               uint64_t range)
+               uint64_t range, bool wait)
 {
    struct drm_msm_vm_bind req = {
       .flags = MSM_VM_BIND_FENCE_FD_OUT,
@@ -456,6 +456,13 @@ tu_map_vm_bind(struct tu_device *dev, uint32_t map_op, uint32_t map_op_flags,
    if (ret)
       return vk_device_set_lost(&dev->vk, "BO map failed: %m");
 
+   if (wait) {
+      if (req.fence_fd < 0)
+         vk_device_set_lost(&dev->vk, "VM_BIND unmap failed: no fence returned");
+      else if (sync_wait(req.fence_fd, -1) < 0)
+         vk_device_set_lost(&dev->vk, "VM_BIND unmap wait failed: %m");
+   }
+
    int old_fence;
    u_rwlock_wrlock(&dev->vm_bind_fence_lock);
    old_fence = dev->vm_bind_fence_fd;
@@ -479,7 +486,7 @@ msm_allocate_vm_bind(struct tu_device *dev,
    if (flags & TU_BO_ALLOC_ALLOW_DUMP)
       map_op_flags |= MSM_VM_BIND_OP_DUMP;
    return tu_map_vm_bind(dev, MSM_VM_BIND_OP_MAP, map_op_flags, iova,
-                         gem_handle, 0, size);
+                         gem_handle, 0, size, false);
 }
 
 static VkResult
@@ -830,7 +837,7 @@ msm_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo)
 {
    if (dev->physical_device->has_vm_bind) {
       tu_map_vm_bind(dev, MSM_VM_BIND_OP_MAP, MSM_VM_BIND_OP_DUMP,
-                     bo->iova, bo->gem_handle, 0, bo->size);
+                     bo->iova, bo->gem_handle, 0, bo->size, false);
    } else {
       mtx_lock(&dev->bo_mutex);
       dev->submit_bo_list[bo->submit_bo_list_idx].flags |= MSM_SUBMIT_BO_DUMP;
@@ -891,7 +898,7 @@ msm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
    if (dev->physical_device->has_vm_bind) {
       if (!bo->lazy) {
          tu_map_vm_bind(dev, MSM_VM_BIND_OP_UNMAP, 0, bo->iova, 0, 0,
-                        bo->size);
+                        bo->size, true);
          tu_free_iova(dev, bo->iova, bo->size);
       }
 
@@ -932,7 +939,7 @@ msm_sparse_vma_init(struct tu_device *dev,
    if (flags & TU_SPARSE_VMA_MAP_ZERO) {
       assert(dev->physical_device->has_vm_bind);
       result = tu_map_vm_bind(dev, MSM_VM_BIND_OP_MAP_NULL, 0,
-                              out_vma->msm.iova, 0, 0, size);
+                              out_vma->msm.iova, 0, 0, size, false);
    }
 
    *out_iova = out_vma->msm.iova;
@@ -946,7 +953,7 @@ msm_sparse_vma_finish(struct tu_device *dev,
 {
    if (dev->physical_device->has_vm_bind) {
       tu_map_vm_bind(dev, MSM_VM_BIND_OP_UNMAP, 0, vma->msm.iova, 0, 0,
-                     vma->msm.size);
+                     vma->msm.size, true);
    }
 
    /* For has_set_iova, if a lazy BO was mapped into this sparse VMA

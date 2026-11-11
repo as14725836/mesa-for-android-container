@@ -410,17 +410,17 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
    bool emit_cache_invalidate_gmem =
       (flushes & TU_CMD_FLAG_CACHE_INVALIDATE_GMEM) &&
       !(flushes & TU_CMD_FLAG_CACHE_INVALIDATE);
-   bool emit_subpass_slice_wait =
-       (flushes & TU_CMD_FLAG_SUBPASS_SLICE_FENCE) &&
+   bool emit_subpass_wait =
+       (flushes & (TU_CMD_FLAG_SUBPASS_SLICE_FENCE |
+                   TU_CMD_FLAG_SUBPASS_FENCE)) &&
         !(flushes & TU_CMD_FLAG_WAIT_FOR_IDLE);
-   bool emit_subpass_slice_fence =
-      emit_cache_invalidate_gmem || emit_subpass_slice_wait;
+   bool emit_subpass_fence = emit_cache_invalidate_gmem || emit_subpass_wait;
 
    if (CHIP >= A7XX && (flushes & TU_CMD_FLAG_BLIT_CACHE_CLEAN) &&
        /* On newer HW SUBPASS_FENCE implicitly waits for resolve events to
         * finish, so we don't need this if we're emitting it.
         */
-       (!emit_subpass_slice_fence ||
+       (!emit_subpass_fence ||
          !cmd_buffer->device->physical_device->info->props.subpass_fence_cleans_resolve))
       /* On A7XX, blit cache flushes are required to ensure blit writes are visible
        * via UCHE. This isn't necessary on A6XX, all writes should be visible implictly.
@@ -440,7 +440,7 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
       tu_emit_rt_workaround<CHIP>(cmd_buffer, cs);
    if (flushes & TU_CMD_FLAG_WAIT_MEM_WRITES)
       tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
-   if (emit_subpass_slice_fence) {
+   if (emit_subpass_fence) {
       /* Emit the stronger flushes in sysmem mode. We need this from
        * experimentation.
        */
@@ -448,13 +448,15 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
                              CP_COND_REG_EXEC_0_SYSMEM);
       if (emit_cache_invalidate_gmem)
          tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CACHE_INVALIDATE);
-      if (emit_subpass_slice_wait)
+      if (emit_subpass_wait)
          tu_cs_emit_wfi(cs);
       tu_cond_exec_end(cs);
 
       if (CHIP >= A8XX) {
          tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_LABEL);
-         tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_SUBPASS_SLICE_FENCE);
+         tu_emit_event_write<CHIP>(cmd_buffer, cs,
+                                   (flushes & TU_CMD_FLAG_SUBPASS_FENCE) ?
+                                   FD_SUBPASS_FENCE : FD_SUBPASS_SLICE_FENCE);
          tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_LABEL);
       } else {
          tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_SUBPASS_FENCE);
@@ -1873,7 +1875,7 @@ tu6_emit_tile_select(struct tu_cmd_buffer *cmd,
           * on the actual offset, and signficantly changing the performance
           * could result in jank between frames as the offset changes.
           */
-         bool non_subsampled_use_fast_store = !fdm_offsets && !bin_scale_en;
+         bool non_subsampled_use_fast_store = !fdm_offsets && !bin_is_scaled;
          bool subsampled_use_fast_store = non_subsampled_use_fast_store ||
             (tile->subsampled_views == tile->visible_views &&
              !tile->subsampled_border);
@@ -6809,6 +6811,13 @@ tu_subpass_barrier(struct tu_cmd_buffer *cmd_buffer,
    enum tu_stage src_stage = vk2tu_src_stage(cmd_buffer->device, src_stage_vk);
    enum tu_stage dst_stage = vk2tu_dst_stage(cmd_buffer->device, dst_stage_vk);
    tu_flush_for_stage<CHIP>(cache, src_stage, dst_stage, !barrier->non_fb_local);
+
+   /* An input attachment that is not in GMEM is read from sysmem, earlier subpass may have stored it with a CCU_RESOLVE
+    * event. SUBPASS_SLICE_FENCE does not seem to wait for CCU_RESOLVE, but SUBPASS_FENCE does.
+    */
+   if (barrier->read_only_input_attachments && (dst_flags & TU_ACCESS_UCHE_READ_GMEM) &&
+       (cache->flush_bits & TU_CMD_FLAG_SUBPASS_SLICE_FENCE))
+      cache->flush_bits |= TU_CMD_FLAG_SUBPASS_FENCE;
 }
 
 template <chip CHIP>
@@ -7067,14 +7076,18 @@ tu_emit_subpass_custom_resolve(struct tu_cmd_buffer *cmd)
     * framebuffer space in the custom resolve subpass when not in the binning
     * pass because we are writing directly to the user-visible attachment. We
     * already aren't relying on the window scissor whenever FDM is enabled,
-    * but it can get in the way if FDM offset is being used because it is
-    * specified in rendering space, so the origin is shifted to the right and
-    * down compared to the framebuffer-space bin coordinates and part of the
-    * bin gets incorrectly clipped. Just disable it here by setting it to the
-    * entire framebuffer. Add an extra tile size for when we are in the
-    * binning pass and still using rendering space.
+    * but it can get in the way because it is specified in rendering space,
+    * so parts of the bin get incorrectly clipped:
+    *  - With FDM offset, the origin is shifted to the right and down
+    *    compared to the framebuffer-space bin coordinates.
+    *  - A merged bin that spans several tiles in framebuffer space, while it
+    *    fits one tile when scaled down in rendering space.
+    *  - A subsampled bin shifted over in subsampled space.
+    * Just disable it here by setting it to the entire framebuffer. Add an
+    * extra tile size for when we are in the binning pass and still using
+    * rendering space.
     */
-   if (tu_enable_fdm_offset(cmd)) {
+   if (cmd->state.fdm_enabled) {
       tu6_emit_window_scissor<CHIP>(cs, 0, 0,
                                     fb->width + tiling->tile0.width - 1,
                                     fb->height + tiling->tile0.height - 1);
@@ -8310,8 +8323,7 @@ tu_fs_reads_dynamic_ds_input_attachment(struct tu_cmd_buffer *cmd,
    uint8_t depth_att = cmd->vk.dynamic_graphics_state.ial.depth_att;
    if (depth_att == MESA_VK_ATTACHMENT_UNUSED)
       return false;
-   unsigned depth_idx =
-      (depth_att == MESA_VK_ATTACHMENT_NO_INDEX) ? 0 : depth_att + 1;
+   unsigned depth_idx = (depth_att == MESA_VK_ATTACHMENT_NO_INDEX) ? 0 : depth_att + TU_DYN_INPUT_ATT_OFFSET;
    return fs->fs.dynamic_input_attachments_used & (1u << depth_idx);
 }
 

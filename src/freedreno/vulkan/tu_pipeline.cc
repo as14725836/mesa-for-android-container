@@ -1858,14 +1858,14 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
          if (ial->depth_att == MESA_VK_ATTACHMENT_NO_INDEX)
             attachments_referenced |= 1;
          else
-            attachments_referenced |= 1u << (ial->depth_att + 1);
+            attachments_referenced |= 1u << (ial->depth_att + TU_DYN_INPUT_ATT_OFFSET);
       }
 
       if (ial->stencil_att != MESA_VK_ATTACHMENT_UNUSED) {
          if (ial->stencil_att == MESA_VK_ATTACHMENT_NO_INDEX)
             attachments_referenced |= 1;
          else
-            attachments_referenced |= 1u << (ial->stencil_att + 1);
+            attachments_referenced |= 1u << (ial->stencil_att + TU_DYN_INPUT_ATT_OFFSET);
       }
 
       keys[MESA_SHADER_FRAGMENT].read_only_input_attachments =
@@ -2882,6 +2882,8 @@ template <chip CHIP>
 static unsigned
 tu6_scissor_size(struct tu_device *dev, const struct vk_viewport_state *vp)
 {
+   if (vp->scissor_count == 0)
+      return 0;
    return 1 + vp->scissor_count * 2;
 }
 
@@ -2889,6 +2891,9 @@ template <chip CHIP>
 void
 tu6_emit_scissor(struct tu_cs *cs, const struct vk_viewport_state *vp)
 {
+   if (vp->scissor_count == 0)
+      return;
+
    tu_cs_emit_pkt4(cs, GRAS_SC_SCREEN_SCISSOR_TL(CHIP, 0).reg, vp->scissor_count * 2);
 
    for (uint32_t i = 0; i < vp->scissor_count; i++) {
@@ -3011,6 +3016,8 @@ tu6_emit_scissor_fdm(struct tu_cs *cs, struct tu_cmd_buffer *cmd,
       state.vp.scissor_count = cmd->state.max_fdm_layers;
    unsigned size = TU_CALLX(cmd->device, tu6_scissor_size)(cmd->device, &state.vp);
    tu_cs_begin_sub_stream(&cmd->sub_cs, size, cs);
+   if (size == 0)
+      return;
    tu_create_fdm_bin_patchpoint(cmd, cs, size, TU_FDM_NONE, fdm_apply_scissors,
                                 state);
 }
