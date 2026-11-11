@@ -1014,7 +1014,9 @@ tu_subpass_use_attachment(struct tu_render_pass *pass, int i, uint32_t a, const 
    struct tu_subpass *subpass = &pass->subpasses[i];
    struct tu_render_pass_attachment *att = &pass->attachments[a];
 
-   if (!subpass->custom_resolve)
+   if (subpass->custom_resolve)
+      att->is_custom_resolve = true;
+   else
       att->gmem = true;
    update_samples(subpass, att->samples);
    att->used_views |= subpass->multiview_mask;
@@ -1590,6 +1592,7 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
                VK_ATTACHMENT_STORE_OP_NONE);
             if (att_info->resolveMode == VK_RESOLVE_MODE_CUSTOM_BIT_EXT) {
                att->will_be_resolved = false;
+               att->is_custom_resolve = true;
                resolve_att->used_views = info->viewMask;
                resolve_att->resolve_views = 0;
                resolve_subpass->color_attachments[i].attachment = a++;
@@ -1712,6 +1715,7 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
                if (common_info->resolveMode == VK_RESOLVE_MODE_CUSTOM_BIT_EXT) {
                   resolve_subpass->depth_stencil_attachment.attachment = a++;
                   att->will_be_resolved = false;
+                  att->is_custom_resolve = true;
                   resolve_att->used_views = info->viewMask;
                   resolve_att->resolve_views = 0;
                } else {

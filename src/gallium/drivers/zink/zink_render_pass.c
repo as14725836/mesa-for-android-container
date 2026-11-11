@@ -187,6 +187,8 @@ zink_render_attachment_shadow(struct zink_context *ctx, uint32_t attachment_shad
    assert(attachment_shadow_mask);
 
    bool blitting = ctx->blitting;
+   struct zink_resource *populated[PIPE_MAX_COLOR_BUFS + 1];
+   uint32_t populated_mask = 0;
    u_foreach_bit(i, attachment_shadow_mask) {
       zink_create_transient_surface(ctx, &ctx->fb_state.cbufs[i], ctx->fb_state.cbufs[i].nr_samples);
       struct pipe_resource *src = ctx->fb_state.cbufs[i].texture;
@@ -197,6 +199,8 @@ zink_render_attachment_shadow(struct zink_context *ctx, uint32_t attachment_shad
             (ctx->rp_clears_enabled >> 2) & BITFIELD_BIT(i)) {
          transient->valid |= zink_fb_clear_full_exists(ctx, i);
       }
+      populated[i] = transient;
+      populated_mask |= BITFIELD_BIT(i);
       if (transient->valid)
          continue;
       struct pipe_surface dst_view = ctx->fb_state.cbufs[i];
@@ -217,13 +221,15 @@ zink_render_attachment_shadow(struct zink_context *ctx, uint32_t attachment_shad
       ctx->blitting = false;
       zink_blit_barriers(ctx, zink_resource(src), transient, true);
       ctx->blitting = true;
-      unsigned clear_mask = i == PIPE_MAX_COLOR_BUFS ?
-                              (BITFIELD_MASK(PIPE_MAX_COLOR_BUFS) << 2) :
-                              (PIPE_CLEAR_DEPTHSTENCIL | ((BITFIELD_MASK(PIPE_MAX_COLOR_BUFS) & ~BITFIELD_BIT(i)) << 2));
-      unsigned clears_enabled = ctx->clears_enabled & clear_mask;
-      unsigned rp_clears_enabled = ctx->rp_clears_enabled & clear_mask;
-      ctx->clears_enabled &= ~clear_mask;
-      ctx->rp_clears_enabled &= ~clear_mask;
+      /* mask all pending clears, this attachment's included: the blit rebinds
+       * the framebuffer, and flushing a clear here would begin a renderpass
+       * that starts this replicate blit again. they are restored below and
+       * applied by the next renderpass
+       */
+      unsigned clears_enabled = ctx->clears_enabled;
+      unsigned rp_clears_enabled = ctx->rp_clears_enabled;
+      ctx->clears_enabled = 0;
+      ctx->rp_clears_enabled = 0;
       util_blitter_blit_generic(ctx->blitter, &dst_view, &dstbox,
                                  src_view, &dstbox, ctx->fb_state.width, ctx->fb_state.height,
                                  PIPE_MASK_RGBAZS, PIPE_TEX_FILTER_NEAREST, NULL,
@@ -237,8 +243,12 @@ zink_render_attachment_shadow(struct zink_context *ctx, uint32_t attachment_shad
       }
       ctx->blitting = blitting;
       pipe_sampler_view_reference(&src_view, NULL);
-      transient->valid = true;
    }
+   /* each blit rebinds the fb, which marks the transients populated before it invalid,
+    * but nothing has rendered to them since
+    */
+   u_foreach_bit(i, populated_mask)
+      populated[i]->valid = true;
 }
 
 void

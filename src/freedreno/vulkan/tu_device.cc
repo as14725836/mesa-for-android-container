@@ -230,7 +230,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_acceleration_structure = has_raytracing,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
-      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter && device->instance->knl->device_get_gpu_timestamp != NULL,
+      .KHR_calibrated_timestamps = device->info->props.has_persistent_counter && device->has_gpu_timestamp,
       .KHR_compute_shader_derivatives = true,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
@@ -327,7 +327,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_attachment_feedback_loop_dynamic_state = true,
       .EXT_attachment_feedback_loop_layout = true,
       .EXT_border_color_swizzle = true,
-      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter && device->instance->knl->device_get_gpu_timestamp != NULL,
+      .EXT_calibrated_timestamps = device->info->props.has_persistent_counter && device->has_gpu_timestamp,
       .EXT_color_write_enable = true,
       .EXT_conditional_rendering = true,
       .EXT_conservative_rasterization = device->info->chip >= 7,
@@ -385,7 +385,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
 #ifdef TU_USE_WSI_PLATFORM
-      .EXT_present_timing = device->info->props.has_persistent_counter && device->instance->knl->device_get_gpu_timestamp != NULL,
+      .EXT_present_timing = device->info->props.has_persistent_counter && device->has_gpu_timestamp,
 #endif
       .EXT_primitive_restart_index = true,
       .EXT_primitive_topology_list_restart = true,
@@ -2874,6 +2874,25 @@ tu_device_get_timestamp(struct vk_device *vk_device, uint64_t *timestamp)
    struct tu_device *dev = container_of(vk_device, struct tu_device, vk);
    const int ret = tu_device_get_gpu_timestamp(dev, timestamp);
    return ret == 0 ? VK_SUCCESS : VK_ERROR_UNKNOWN;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_GetCalibratedTimestampsKHR(VkDevice _device,
+                              uint32_t timestampCount,
+                              const VkCalibratedTimestampInfoKHR *pTimestampInfos,
+                              uint64_t *pTimestamps,
+                              uint64_t *pMaxDeviation)
+{
+   VK_FROM_HANDLE(tu_device, dev, _device);
+
+   VkResult result =
+      tu_device_get_calibrated_timestamps(dev, timestampCount, pTimestampInfos,
+                                          pTimestamps, pMaxDeviation);
+   if (result == VK_ERROR_FEATURE_NOT_PRESENT)
+      return vk_common_GetCalibratedTimestampsKHR(
+         _device, timestampCount, pTimestampInfos, pTimestamps, pMaxDeviation);
+
+   return result;
 }
 
 static void

@@ -1939,7 +1939,21 @@ tu6_emit_sysmem_resolves(struct tu_cmd_buffer *cmd,
                          struct tu_cs *cs,
                          const struct tu_subpass *subpass)
 {
+   /* Every slot can be UNUSED if there are no resolves. Don't pay the flushes
+    * below for an empty one.
+    */
+   bool any_resolves = false;
    if (subpass->resolve_attachments) {
+      for (unsigned i = 0; i < subpass->resolve_count; i++) {
+         if (subpass->resolve_attachments[i].attachment !=
+             VK_ATTACHMENT_UNUSED) {
+            any_resolves = true;
+            break;
+         }
+      }
+   }
+
+   if (any_resolves) {
       /* From the documentation for vkCmdNextSubpass, section 7.4 "Render Pass
        * Commands":
        *
@@ -3188,14 +3202,15 @@ tu_renderpass_begin(struct tu_cmd_buffer *cmd)
          if (!subpass->custom_resolve)
             continue;
 
+         cmd->state.fdm_custom_resolve_subsampled = true;
          for (unsigned j = 0; j < subpass->color_count; j++) {
             uint32_t a = subpass->color_attachments[j].attachment;
             if (a == VK_ATTACHMENT_UNUSED)
                continue;
             const tu_image_view *iview = cmd->state.attachments[a];
-            if (iview->image->vk.create_flags &
-                VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT) {
-               cmd->state.fdm_custom_resolve_subsampled = true;
+            if (!(iview->image->vk.create_flags &
+                  VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT)) {
+               cmd->state.fdm_custom_resolve_subsampled = false;
                break;
             }
          }
@@ -3203,9 +3218,9 @@ tu_renderpass_begin(struct tu_cmd_buffer *cmd)
          uint32_t a = subpass->depth_stencil_attachment.attachment;
          if (a != VK_ATTACHMENT_UNUSED) {
             const tu_image_view *iview = cmd->state.attachments[a];
-            if (iview->image->vk.create_flags &
-                VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT) {
-               cmd->state.fdm_custom_resolve_subsampled = true;
+            if (!(iview->image->vk.create_flags &
+                 VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT)) {
+               cmd->state.fdm_custom_resolve_subsampled = false;
             }
          }
 
@@ -3961,8 +3976,15 @@ tu_emit_subsampled(struct tu_cmd_buffer *cmd,
            cmd->state.pass->attachments[i].store_stencil) &&
           (cmd->state.attachments[i]->image->vk.create_flags &
            VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT)) {
+         /* If only some attachments written by custom resolve are subsampled, then we had to force off subsampling when
+          * emitting custom resolve viewport/scissor. Emit the dummy metadata in this case, as if we had used sysmem
+          * rendering.
+          */
+         bool force_non_subsampled =
+            cmd->state.pass->attachments[i].is_custom_resolve &&
+            !cmd->state.fdm_custom_resolve_subsampled;
          tu_emit_subsampled_metadata(cmd, cs, i,
-                                     tiles, tiling, vsc,
+                                     force_non_subsampled ? NULL : tiles, tiling, vsc,
                                      cmd->state.framebuffer,
                                      fdm_offsets);
       }
@@ -5498,7 +5520,12 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
    if (cmd_buffer->state.pass) {
       tu_clean_all_pending(&cmd_buffer->state.renderpass_cache);
       tu_emit_cache_flush_renderpass<CHIP>(cmd_buffer);
-   } else {
+   }
+
+   /* A suspended chain is rendered after cs, so in order to not lose the flushes - do them here. */
+   if (!cmd_buffer->state.pass ||
+       cmd_buffer->state.suspend_resume == SR_IN_CHAIN ||
+       cmd_buffer->state.suspend_resume == SR_IN_CHAIN_AFTER_PRE_CHAIN) {
       tu_clean_all_pending(&cmd_buffer->state.cache);
       cmd_buffer->state.cache.flush_bits |=
          TU_CMD_FLAG_CCU_CLEAN_COLOR |

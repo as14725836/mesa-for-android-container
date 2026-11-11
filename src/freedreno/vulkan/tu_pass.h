@@ -130,6 +130,9 @@ struct tu_render_pass_attachment
    bool cond_load_allowed;
    bool cond_store_allowed;
 
+   /* Whether the attachment is written by a custom resolve subpass. */
+   bool is_custom_resolve;
+
    int32_t gmem_offset_stencil[TU_GMEM_LAYOUT_COUNT];
 
    /* The subpass id in which the attachment will be used first/last. */
