@@ -816,26 +816,47 @@ nir_64_2x32_memory_order(nir_builder *build, nir_def *src)
    return nir_swizzle(build, src, swap, src->num_components);
 }
 
+#define NIR_BUILD_REDUCE(name)                  \
+   case 2:                                      \
+      return nir_##name##2(b, src0, src1);  \
+   case 3:                                      \
+      return nir_##name##3(b, src0, src1);  \
+   case 4:                                      \
+      return nir_##name##4(b, src0, src1);  \
+   case 5:                                      \
+      return nir_##name##5(b, src0, src1);  \
+   case 6:                                      \
+      return nir_##name##6(b, src0, src1);  \
+   case 7:                                      \
+      return nir_##name##7(b, src0, src1);  \
+   case 8:                                      \
+      return nir_##name##8(b, src0, src1);  \
+   case 9:                                      \
+      return nir_##name##9(b, src0, src1);  \
+   case 10:                                     \
+      return nir_##name##10(b, src0, src1); \
+   case 11:                                     \
+      return nir_##name##11(b, src0, src1); \
+   case 12:                                     \
+      return nir_##name##12(b, src0, src1); \
+   case 13:                                     \
+      return nir_##name##13(b, src0, src1); \
+   case 14:                                     \
+      return nir_##name##14(b, src0, src1); \
+   case 15:                                     \
+      return nir_##name##15(b, src0, src1); \
+   case 16:                                     \
+      return nir_##name##16(b, src0, src1);
+
 /* Selects the right fdot given the number of components in each source. */
 static inline nir_def *
-nir_fdot(nir_builder *build, nir_def *src0, nir_def *src1)
+nir_fdot(nir_builder *b, nir_def *src0, nir_def *src1)
 {
    assert(src0->num_components == src1->num_components);
    switch (src0->num_components) {
    case 1:
-      return nir_fmul(build, src0, src1);
-   case 2:
-      return nir_fdot2(build, src0, src1);
-   case 3:
-      return nir_fdot3(build, src0, src1);
-   case 4:
-      return nir_fdot4(build, src0, src1);
-   case 5:
-      return nir_fdot5(build, src0, src1);
-   case 8:
-      return nir_fdot8(build, src0, src1);
-   case 16:
-      return nir_fdot16(build, src0, src1);
+      return nir_fmul(b, src0, src1);
+   NIR_BUILD_REDUCE(fdot)
    default:
       UNREACHABLE("bad component size");
    }
@@ -844,24 +865,13 @@ nir_fdot(nir_builder *build, nir_def *src0, nir_def *src1)
 }
 
 static inline nir_def *
-nir_bfdot(nir_builder *build, nir_def *src0, nir_def *src1)
+nir_bfdot(nir_builder *b, nir_def *src0, nir_def *src1)
 {
    assert(src0->num_components == src1->num_components);
    switch (src0->num_components) {
    case 1:
-      return nir_bfmul(build, src0, src1);
-   case 2:
-      return nir_bfdot2(build, src0, src1);
-   case 3:
-      return nir_bfdot3(build, src0, src1);
-   case 4:
-      return nir_bfdot4(build, src0, src1);
-   case 5:
-      return nir_bfdot5(build, src0, src1);
-   case 8:
-      return nir_bfdot8(build, src0, src1);
-   case 16:
-      return nir_bfdot16(build, src0, src1);
+      return nir_bfmul(b, src0, src1);
+   NIR_BUILD_REDUCE(bfdot)
    default:
       UNREACHABLE("bad component size");
    }
@@ -875,18 +885,7 @@ nir_ball_iequal(nir_builder *b, nir_def *src0, nir_def *src1)
    switch (src0->num_components) {
    case 1:
       return nir_ieq(b, src0, src1);
-   case 2:
-      return nir_ball_iequal2(b, src0, src1);
-   case 3:
-      return nir_ball_iequal3(b, src0, src1);
-   case 4:
-      return nir_ball_iequal4(b, src0, src1);
-   case 5:
-      return nir_ball_iequal5(b, src0, src1);
-   case 8:
-      return nir_ball_iequal8(b, src0, src1);
-   case 16:
-      return nir_ball_iequal16(b, src0, src1);
+   NIR_BUILD_REDUCE(ball_iequal)
    default:
       UNREACHABLE("bad component size");
    }
@@ -904,22 +903,13 @@ nir_bany_inequal(nir_builder *b, nir_def *src0, nir_def *src1)
    switch (src0->num_components) {
    case 1:
       return nir_ine(b, src0, src1);
-   case 2:
-      return nir_bany_inequal2(b, src0, src1);
-   case 3:
-      return nir_bany_inequal3(b, src0, src1);
-   case 4:
-      return nir_bany_inequal4(b, src0, src1);
-   case 5:
-      return nir_bany_inequal5(b, src0, src1);
-   case 8:
-      return nir_bany_inequal8(b, src0, src1);
-   case 16:
-      return nir_bany_inequal16(b, src0, src1);
+   NIR_BUILD_REDUCE(bany_inequal)
    default:
       UNREACHABLE("bad component size");
    }
 }
+
+#undef NIR_BUILD_REDUCE
 
 static inline nir_def *
 nir_bany(nir_builder *b, nir_def *src)

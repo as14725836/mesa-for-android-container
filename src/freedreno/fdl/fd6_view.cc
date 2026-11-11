@@ -45,6 +45,7 @@ fdl6_format_swiz(enum pipe_format format, bool has_z24uint_s8uint,
    case PIPE_FORMAT_B8G8_R8G8_UNORM:
    case PIPE_FORMAT_G8_B8R8_420_UNORM:
    case PIPE_FORMAT_G8_B8_R8_420_UNORM:
+   case PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM:
       /* These formats are currently only used for Vulkan, and border colors
        * aren't allowed on these formats in Vulkan because, from the
        * description of VkImageViewCreateInfo:
@@ -65,6 +66,16 @@ fdl6_format_swiz(enum pipe_format format, bool has_z24uint_s8uint,
       format_swiz[0] = PIPE_SWIZZLE_Z;
       format_swiz[1] = PIPE_SWIZZLE_X;
       format_swiz[2] = PIPE_SWIZZLE_Y;
+      break;
+   case PIPE_FORMAT_YUYV:
+   case PIPE_FORMAT_UYVY:
+   case PIPE_FORMAT_Y210:
+      /* YUV-colorspace packed 422 formats, reached from GL via zink. Leave the
+       * channels in raw memory order: the NIR external-sampler lowering
+       * (nir_lower_tex's lower_yu_yv / lower_yx_xuxv) already picks the Y, Cb
+       * and Cr channels out itself, so applying the semantic swizzle here
+       * would reorder them a second time.
+       */
       break;
    case PIPE_FORMAT_DXT1_RGB:
    case PIPE_FORMAT_DXT1_SRGB:
@@ -214,12 +225,14 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
       if (ubwc_enabled) {
          /* no separate ubwc base, image must have the expected layout */
          for (uint32_t i = 0; i < 3; i++) {
-            base_addr[i] = args->iova +
+            uint64_t plane_base = args->is_disjoint ? args->plane_iova[i] : args->iova;
+            base_addr[i] = plane_base +
                fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
          }
       } else {
          for (uint32_t i = 0; i < 3; i++) {
-            base_addr[i] = args->iova +
+            uint64_t plane_base = args->is_disjoint ? args->plane_iova[i] : args->iova;
+            base_addr[i] = plane_base +
                fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
          }
       }
@@ -240,9 +253,25 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
       fd6_texture_swap(args->format, (enum a6xx_tile_mode)layout->tile_mode, layout->is_mutable);
    enum a6xx_tile_mode tile_mode = (enum a6xx_tile_mode)fdl_tile_mode(layout, args->base_miplevel);
 
-   if (ubwc_enabled && util_format_is_yuv(args->format) &&
-       util_format_get_num_planes(args->format) == 2) {
+   if (ubwc_enabled && util_format_get_num_planes(args->format) == 2 &&
+       (util_format_is_yuv(args->format) ||
+        args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
+        args->format == PIPE_FORMAT_G8_B8R8_420_UNORM)) {
       texture_format = FMT6_R8_G8B8_2PLANE_420_UNORM;
+   }
+
+   /* A UBWC 2-plane YUV image's flag buffer uses the multiplanar 32x8 (Y) /
+    * 16x8 (UV) block scheme; FMT6_NV12_Y/_UV are the single-plane formats
+    * whose blocks match. Y is tagged Y8_UNORM (turnip) or Y8_U8V8_420 plane 0
+    * (GL). */
+   if (ubwc_enabled && !multi_plane) {
+      if (layout->format == PIPE_FORMAT_Y8_UNORM ||
+          (layout->format == PIPE_FORMAT_Y8_U8V8_420_UNORM &&
+           layout->plane == 0)) {
+         texture_format = FMT6_NV12_Y;
+      } else if (fdl6_is_yuv_uv_plane(layout)) {
+         texture_format = FMT6_NV12_UV;
+      }
    }
 
    bool is_d24s8 = (args->format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
@@ -341,6 +370,14 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
             view->descriptor[10] = 0;
          }
 
+         /* This path returns before the common code sets
+          * pitch/base_addr/layer_size, which the 2D-engine dest path reads
+          * (RB_A2D_DEST_BUFFER_PITCH); an uninitialized pitch trips the pack
+          * assert. Seed from plane 0. */
+         view->pitch = fdl_pitch(layouts[0], args->base_miplevel);
+         view->base_addr = base_addr[0];
+         view->layer_size = fdl_layer_stride(layouts[0], args->base_miplevel);
+
          assert(args->type != FDL_VIEW_TYPE_3D);
          return;
       } else if (args->filter_width) {
@@ -375,7 +412,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
 
       descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(base_addr[0]);
       descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr[0] >> 32) |
-                      A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false));
+                      A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false)) |
+                      A8XX_TEX_MEMOBJ_1_DEPTH(depth);
       descriptor[2] = A8XX_TEX_MEMOBJ_2_WIDTH(width) |
                       A8XX_TEX_MEMOBJ_2_HEIGHT(height) |
                       A8XX_TEX_MEMOBJ_2_SAMPLES((enum a3xx_msaa_samples)util_logbase2(layout->nr_samples));
@@ -388,6 +426,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
                       COND(util_format_is_srgb(args->format), A8XX_TEX_MEMOBJ_4_SRGB);
       descriptor[5] = COND(is_mutable, A8XX_TEX_MEMOBJ_5_MUTABLEEN);
       descriptor[6] = A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET(pitch * 8) |   /* in bits */
+                      A8XX_TEX_MEMOBJ_6_MIN_LINE_OFFSET(layout->pitchalign - 6) |
                       A8XX_TEX_MEMOBJ_6_MIPLVLS(args->level_count - 1);
 
       if (multi_plane) {
@@ -420,10 +459,17 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
          descriptor[9] |=
             A8XX_TEX_MEMOBJ_9_UV_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
 
+         /* Seed pitch/base_addr/layer_size from plane 0 (see the A6XX
+          * multiplane path above): this branch returns before the common code
+          * fills them in, and the 2D-engine dest path reads pitch for
+          * RB_A2D_DEST_BUFFER_PITCH -- an uninitialized value trips the pack
+          * assert intermittently. */
+         view->pitch = fdl_pitch(layouts[0], args->base_miplevel);
+         view->base_addr = base_addr[0];
+         view->layer_size = fdl_layer_stride(layouts[0], args->base_miplevel);
+
          return;
       } else {
-         descriptor[1] |= A8XX_TEX_MEMOBJ_1_DEPTH(depth);
-         descriptor[6] |= A8XX_TEX_MEMOBJ_6_MIN_LINE_OFFSET(layout->pitchalign - 6);
          if (args->filter_width) {
             descriptor[5] |= A8XX_TEX_MEMOBJ_5_FILTER_SIZE_X(args->filter_width) |
                            A8XX_TEX_MEMOBJ_5_FILTER_SIZE_Y(args->filter_height) |

@@ -1099,6 +1099,11 @@ struct pipe_caps {
    bool prefer_persp;
    bool blit_3d;
    bool glsl_bindless_handles_are_32bit;
+   /* Whether a single-plane packed 422 YUV format (e.g. PIPE_FORMAT_YUYV) can
+    * be sampled directly through its native format, without needing an
+    * additional alias view of the same memory reinterpreted as RGBA.
+    */
+   bool native_packed_422;
    bool polygon_stipple;
    bool disable_custom_border_color_caching;
 

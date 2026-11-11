@@ -26,24 +26,20 @@ def sampler_type(name, gl_type, base_type, dim, shadow, array, sampled_type):
     })
 
 def vector_type(base_name, vec_name, base_type, gl_type, extra_gl_type=None):
-    gl_types = [None, None, None, None]
+    gl_types = [None] * 16
 
     if extra_gl_type is None:
         extra_gl_type = ""
 
     if gl_type:
-        gl_types = [gl_type + extra_gl_type,
-                    gl_type + "_VEC2" + extra_gl_type,
-                    gl_type + "_VEC3" + extra_gl_type,
-                    gl_type + "_VEC4" + extra_gl_type]
+        gl_types[0:4] = [gl_type + extra_gl_type,
+                         gl_type + "_VEC2" + extra_gl_type,
+                         gl_type + "_VEC3" + extra_gl_type,
+                         gl_type + "_VEC4" + extra_gl_type]
 
     simple_type(base_name, gl_types[0], base_type, 1, 1)
-    simple_type(vec_name + "2",  gl_types[1], base_type, 2, 1)
-    simple_type(vec_name + "3",  gl_types[2], base_type, 3, 1)
-    simple_type(vec_name + "4",  gl_types[3], base_type, 4, 1)
-    simple_type(vec_name + "5", None, base_type, 5, 1)
-    simple_type(vec_name + "8", None, base_type, 8, 1)
-    simple_type(vec_name + "16", None, base_type, 16, 1)
+    for i in range(2, 17):
+        simple_type(vec_name + str(i), gl_types[i - 1], base_type, i, 1)
 
 simple_type("error",  "GL_INVALID_ENUM", "GLSL_TYPE_ERROR", 0, 0)
 simple_type("void",   "GL_INVALID_ENUM", "GLSL_TYPE_VOID",  0, 0)

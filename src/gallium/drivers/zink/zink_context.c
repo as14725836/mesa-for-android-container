@@ -196,6 +196,9 @@ zink_context_destroy(struct pipe_context *pctx)
    pipe_resource_reference(&ctx->dummy_xfb_buffer, NULL);
    zink_resource_reference(&ctx->swapchain, NULL);
 
+   if (ctx->null_sampler)
+      VKSCR(DestroySampler)(screen->dev, ctx->null_sampler, NULL);
+
    zink_descriptors_deinit_bindless(ctx);
 
    u_upload_destroy(pctx->stream_uploader);
@@ -830,6 +833,14 @@ update_descriptor_state_sampler(struct zink_context *ctx, mesa_shader_stage shad
                ctx->di.textures[shader][slot].sampler = sampler;
             }
          }
+         /* mesa/st's multi-plane YUV lowering binds an extra plane's sampler
+          * view at a slot the application never calls set_sampler_states()
+          * for, but the shader still declares a combined image sampler there,
+          * and Vulkan requires such a descriptor to carry a valid VkSampler.
+          * Substitute a harmless fallback rather than leave it null.
+          */
+         if (!ctx->di.textures[shader][slot].sampler)
+            ctx->di.textures[shader][slot].sampler = ctx->null_sampler;
       }
    } else {
       ctx->di.textures[shader][slot].imageView = VK_NULL_HANDLE;
@@ -1285,6 +1296,18 @@ zink_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *pres,
       ivci = create_ivci(screen, res, &templ, target);
       ivci.subresourceRange.levelCount = state->is_tex2d_from_buf ? 1 : (state->u.tex.last_level - state->u.tex.first_level + 1);
       ivci.subresourceRange.aspectMask = util_format_is_depth_or_stencil(state->format) ? sampler_aspect_from_format(state->format) : res->aspect;
+
+      /* NV12 luma sampling: a COLOR-aspect view of a 2-plane image resolves
+       * to the chroma plane, so give plane 0 a PLANE_0 view with the plane-0
+       * (R8) format (chroma uses the PLANE_1 sibling from resource_create).
+       */
+      if (ivci.subresourceRange.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+          util_format_is_yuv(pres->format) &&
+          util_format_get_num_planes(pres->format) == 2) {
+         ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT;
+         ivci.format = zink_get_format(screen,
+            util_format_get_plane_format(pres->format, 0));
+      }
       /* samplers for stencil aspects of packed formats need to always use stencil swizzle */
       if (ivci.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
          ivci.components.r = zink_component_mapping(clamp_zs_swizzle(sampler_view->base.swizzle_r));
@@ -6446,6 +6469,23 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
          PIPE_BIND_STREAM_OUTPUT, PIPE_USAGE_IMMUTABLE, sizeof(data));
       if (!ctx->dummy_xfb_buffer)
          goto fail;
+
+      const VkSamplerCreateInfo null_sci = {
+         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+         .magFilter = VK_FILTER_NEAREST,
+         .minFilter = VK_FILTER_NEAREST,
+         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+         .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+         .maxLod = 0.25f,
+      };
+      VkResult result = VKSCR(CreateSampler)(screen->dev, &null_sci, NULL, &ctx->null_sampler);
+      if (result != VK_SUCCESS) {
+         mesa_loge("ZINK: vkCreateSampler failed for fallback sampler (%s)",
+                   vk_Result_to_str(result));
+         goto fail;
+      }
    }
    if (!is_copy_only) {
       if (!zink_descriptors_init(ctx))

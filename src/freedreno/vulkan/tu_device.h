@@ -396,6 +396,12 @@ struct tu_device
    BITSET_DECLARE(custom_border_color, TU_BORDER_COLOR_COUNT);
    mtx_t mutex;
 
+   struct tu_bo *embedded_sampler_bo;
+   struct set *embedded_sampler_ht;
+   struct list_head free_embedded_samplers;
+   unsigned embedded_sampler_count;
+   mtx_t embedded_sampler_mutex;
+
    mtx_t vma_mutex;
    struct util_vma_heap vma;
 

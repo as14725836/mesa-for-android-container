@@ -187,7 +187,7 @@ format_to_ifmt(enum pipe_format format)
       return R2D_FLOAT32;
    if (format == PIPE_FORMAT_S8_UINT)
       return R2D_INT8;
-   if (format == PIPE_FORMAT_A8_UNORM)
+   if (format == PIPE_FORMAT_A8_UNORM || format == PIPE_FORMAT_Y8_UNORM)
       return R2D_UNORM8;
    if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
       return R2D_FLOAT16;
@@ -431,6 +431,9 @@ r2d_clear_value(struct tu_cmd_buffer *cmd,
 {
    uint32_t clear_value[4] = {};
 
+   if (format == PIPE_FORMAT_Y8_UNORM)
+      format = PIPE_FORMAT_R8_UNORM;
+
    switch (format) {
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
    case PIPE_FORMAT_Z24X8_UNORM:
@@ -670,6 +673,19 @@ r2d_dst_buffer(struct tu_cs *cs, enum pipe_format format, uint64_t va, uint32_t 
                    A6XX_RB_A2D_DEST_BUFFER_PITCH(pitch));
 }
 
+static bool
+r2d_format_is_yuv(enum a6xx_format fmt)
+{
+   switch (fmt) {
+   case FMT6_NV12_Y:
+   case FMT6_P010_Y:
+   case FMT6_P010_UV:
+      return true;
+   default:
+      return false;
+   }
+}
+
 template <chip CHIP>
 static void
 r2d_setup_common(struct tu_cmd_buffer *cmd,
@@ -689,6 +705,13 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
    enum a6xx_format fmt = blit_base_format<CHIP>(dst_format, ubwc, false);
    fixup_dst_format(src_format, &dst_format, &fmt);
    enum a6xx_2d_ifmt ifmt = format_to_ifmt(dst_format);
+
+   /* Like the destination, RB and GRAS have to use FMT6_NV12_Y for the Y
+    * plane of NV12 when it's compressed.
+    */
+   enum a6xx_format blt_fmt =
+      dst_format == PIPE_FORMAT_Y8_UNORM && ubwc ? FMT6_NV12_Y : fmt;
+   bool is_yuv = r2d_format_is_yuv(blt_fmt);
 
    enum a6xx_a2d_pixel_op pixel_op = PIXEL_OP_DISABLED;
    enum adreno_rb_blend_factor color_src_factor = FACTOR_ZERO;
@@ -723,21 +746,25 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
    tu_cs_emit_regs(cs, A6XX_RB_A2D_BLT_CNTL(
       .rotate = static_cast<enum a6xx_rotation>(blit_param),
       .solid_color = clear,
-      .color_format = fmt,
+      .color_format = blt_fmt,
       .scissor = scissor,
-      .is_src_yuv = fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !clear,
+      .is_src_yuv = (fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !clear) ||
+                    is_yuv,
       .mask = 0xf,
       .ifmt = util_format_is_srgb(dst_format) ? R2D_UNORM8_SRGB : ifmt,
+      .linear_yuv = is_yuv,
    ));
 
    tu_cs_emit_regs(cs, GRAS_A2D_BLT_CNTL(CHIP,
       .rotate = static_cast<enum a6xx_rotation>(blit_param),
       .solid_color = clear,
-      .color_format = fmt,
+      .color_format = blt_fmt,
       .scissor = scissor,
-      .is_src_yuv = fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !clear,
+      .is_src_yuv = (fmt == FMT6_Z24_UNORM_S8_UINT_AS_R8G8B8A8 && !clear) ||
+                    is_yuv,
       .mask = 0xf,
       .ifmt = util_format_is_srgb(dst_format) ? R2D_UNORM8_SRGB : ifmt,
+      .linear_yuv = is_yuv,
    ));
 
    if (CHIP > A6XX) {
@@ -1227,8 +1254,8 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
       tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_FRAGMENT, fs, &pvtmem, fs_iova);
    }
 
-   tu6_emit_xs_constants(cs, MESA_SHADER_VERTEX, vs, vs_iova);
-   tu6_emit_xs_constants(cs, MESA_SHADER_FRAGMENT, fs, fs_iova);
+   tu6_emit_xs_constants(cs, MESA_SHADER_VERTEX, NULL, vs, vs_iova, 0);
+   tu6_emit_xs_constants(cs, MESA_SHADER_FRAGMENT, NULL, fs, fs_iova, 0);
 
    tu_cs_emit_regs(cs, PC_CNTL(CHIP));
    if (CHIP >= A7XX) {
@@ -2347,13 +2374,14 @@ event_blit_setup(struct tu_cs *cs,
                  uint32_t buffer_id,
                  const struct tu_render_pass_attachment *att,
                  enum a6xx_blit_event_type blit_event_type,
-                 uint32_t clear_mask)
+                 uint32_t clear_mask,
+                 uint32_t yuv_plane_id = 0)
 {
    tu_cs_emit_regs(
       cs, A6XX_RB_RESOLVE_GMEM_BUFFER_INFO(tu_msaa_samples(att->samples)));
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_RESOLVE_CNTL_0, 1);
-   tu_cs_emit(cs, 0);
+   tu_cs_emit(cs, A6XX_RB_RESOLVE_CNTL_0(.yuv_plane_id = yuv_plane_id).value);
 
    tu_cs_emit_regs(
       cs,
@@ -2394,6 +2422,97 @@ event_blit_run(struct tu_cmd_buffer *cmd,
    }
 
    tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_RESOLVE);
+}
+
+template <chip CHIP>
+static uint32_t
+tu_resolve_group_include_buffer(struct tu_resolve_group *resolve_group,
+                                VkFormat format);
+
+/* Emit one BLIT event (load or store) for a single NV12 plane: Y (plane 0) or
+ * UV (plane 1).  Per-plane RB_RESOLVE_SYSTEM_BUFFER_* is built from the plane's
+ * fdl_layout, as tu6_emit_mrt() does.
+ */
+template <chip CHIP>
+static void
+event_blit_run_nv12(struct tu_cmd_buffer *cmd,
+                    struct tu_cs *cs,
+                    const struct tu_render_pass_attachment *att,
+                    const struct tu_image_view *iview,
+                    uint32_t layer,
+                    uint32_t plane)
+{
+   const struct fdl_layout *layout = &iview->image->layout[plane];
+   unsigned level = iview->vk.base_mip_level;
+   uint64_t base_iova = tu_image_plane_iova(iview->image, plane);
+   uint64_t addr = base_iova + fdl_surface_offset(layout, level,
+                                                  iview->vk.base_array_layer + layer);
+   uint32_t pitch = fdl_pitch(layout, level);
+   bool ubwc = layout->ubwc;
+
+   /* Keep in sync with tu6_emit_mrt()'s NV12 format selection. */
+   enum a6xx_format format = ubwc ? FMT6_R8_G8B8_2PLANE_420_UNORM : FMT6_NV12_4R;
+   enum a6xx_tile_mode tile_mode = ubwc ? TILE6_3 : TILE6_LINEAR;
+
+   tu_cs_emit_regs(cs, A6XX_RB_RESOLVE_SYSTEM_BUFFER_INFO(
+      .tile_mode = tile_mode,
+      .flags = ubwc,
+      .samples = tu_msaa_samples(att->samples),
+      .color_swap = WZYX,
+      .color_format = format,
+   ));
+   tu_cs_emit_regs(cs, A6XX_RB_RESOLVE_SYSTEM_BUFFER_BASE(.qword = addr));
+   tu_cs_emit_regs(cs, A6XX_RB_RESOLVE_SYSTEM_BUFFER_PITCH(pitch));
+
+   if (ubwc) {
+      uint64_t flag_addr = base_iova +
+         fdl_ubwc_offset(layout, level, iview->vk.base_array_layer + layer);
+      tu_cs_emit_regs(cs, A6XX_RB_RESOLVE_SYSTEM_FLAG_BUFFER_BASE(.qword = flag_addr));
+      tu_cs_emit_regs(cs, A6XX_RB_RESOLVE_SYSTEM_FLAG_BUFFER_PITCH(
+         .pitch = fdl_ubwc_pitch(layout, level),
+         .array_pitch = layout->ubwc_layer_size >> 2,
+      ));
+   }
+
+   uint32_t gmem_base = plane == 0 ?
+      tu_attachment_gmem_offset(cmd, att, layer) :
+      tu_attachment_gmem_offset_uv(cmd, att, layer);
+   tu_cs_emit_regs(cs, A6XX_RB_RESOLVE_GMEM_BUFFER_BASE(gmem_base));
+
+   tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_RESOLVE);
+}
+
+/* Load or store both planes of an NV12 render target to/from GMEM.  Each plane
+ * is a separate BLIT event discriminated by RB_RESOLVE_CNTL_0.yuv_plane_id.
+ */
+template <chip CHIP>
+static void
+tu_emit_blit_nv12(struct tu_cmd_buffer *cmd,
+                  struct tu_cs *cs,
+                  struct tu_resolve_group *resolve_group,
+                  const struct tu_image_view *iview,
+                  const struct tu_render_pass_attachment *att,
+                  enum a6xx_blit_event_type blit_event_type,
+                  bool scissor_per_layer)
+{
+   assert(blit_event_type == BLIT_EVENT_STORE ||
+          blit_event_type == BLIT_EVENT_LOAD);
+
+   uint32_t buffer_id = tu_resolve_group_include_buffer<CHIP>(resolve_group,
+                                                              att->format);
+
+   for (uint32_t plane = 0; plane < 2; plane++) {
+      event_blit_setup(cs, buffer_id, att, blit_event_type, 0, plane);
+
+      for_each_layer(i, att->used_views, cmd->state.framebuffer->layers) {
+         if (scissor_per_layer)
+            tu6_emit_blit_scissor(cmd, cs, i, true);
+         event_blit_run_nv12<CHIP>(cmd, cs, att, iview, i, plane);
+      }
+   }
+
+   tu_flush_for_access<CHIP>(&cmd->state.cache, TU_ACCESS_BLIT_WRITE_GMEM,
+                             TU_ACCESS_NONE);
 }
 
 static void
@@ -2677,8 +2796,11 @@ tu_image_view_copy_blit(struct fdl6_view *iview,
    const struct fdl_layout *layout =
       &image->layout[tu6_plane_index(image->vk.format, aspect_mask)];
 
+   uint64_t base_iova =
+      tu_image_plane_iova(image, tu6_plane_index(image->vk.format, aspect_mask));
+
    const struct fdl_view_args args = {
-      .iova = image->iova,
+      .iova = base_iova,
       .base_miplevel = subres->mipLevel,
       .level_count = 1,
       .base_array_layer = subres->baseArrayLayer + layer,
@@ -2958,14 +3080,8 @@ tu_copy_buffer_to_image(struct tu_cmd_buffer *cmd,
       src_format = PIPE_FORMAT_S8_UINT;
    }
 
-   /* note: could use "R8_UNORM" when no UBWC */
    bool has_unaligned = CHIP >= A7XX; /* If unaligned buffer copies are supported. */
    unsigned blit_param = 0;
-   if (src_format == PIPE_FORMAT_Y8_UNORM) {
-      ops = &r3d_ops<CHIP>;
-      blit_param = R3D_COPY;
-      has_unaligned = false;
-   }
 
    VkOffset3D offset = info->imageOffset;
    VkExtent3D extent = info->imageExtent;
@@ -3195,12 +3311,7 @@ tu_copy_image_to_buffer(struct tu_cmd_buffer *cmd,
       dst_format = PIPE_FORMAT_S8_UINT;
    }
 
-   /* note: could use "R8_UNORM" when no UBWC */
    unsigned blit_param = 0;
-   if (dst_format == PIPE_FORMAT_Y8_UNORM) {
-      ops = &r3d_ops<CHIP>;
-      blit_param = R3D_COPY;
-   }
 
    VkOffset3D offset = info->imageOffset;
    VkExtent3D extent = info->imageExtent;
@@ -3418,7 +3529,7 @@ static bool
 image_is_r8g8(struct tu_image *image)
 {
    return image->layout[0].cpp == 2 &&
-      vk_format_get_nr_components(image->vk.format) == 2;
+      fdl_format_is_r8g8(vk_format_to_pipe_format(image->vk.format));
 }
 
 template <chip CHIP>
@@ -3464,12 +3575,9 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
    enum pipe_format dst_format = copy_format(dst_image->vk.format, info->dstSubresource.aspectMask);
    enum pipe_format src_format = copy_format(src_image->vk.format, info->srcSubresource.aspectMask);
 
-   /* note: could use "R8_UNORM" when no UBWC */
    unsigned blit_param = 0;
-   if (dst_format == PIPE_FORMAT_Y8_UNORM ||
-       src_format == PIPE_FORMAT_Y8_UNORM ||
-       (is_msaa && (util_format_is_float16(src_format) ||
-                    util_format_is_float16(dst_format)))) {
+   if (is_msaa && (util_format_is_float16(src_format) ||
+                   util_format_is_float16(dst_format))) {
       ops = &r3d_ops<CHIP>;
       blit_param = R3D_COPY;
    }
@@ -4986,6 +5094,10 @@ tu_emit_clear_gmem_attachment(struct tu_cmd_buffer *cmd,
    const struct tu_render_pass_attachment *att =
       &cmd->state.pass->attachments[attachment];
 
+   /* NV12 render targets have no GMEM clear path; apps must fully overwrite. */
+   if (tu6_format_is_yuv_render_target(att->format))
+      return;
+
    trace_start_gmem_clear(&cmd->rp_trace, cs, cmd, att->format, att->samples);
 
    tu_cs_emit_regs(cs,
@@ -5406,6 +5518,12 @@ tu_clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
    if (!attachment->clear_mask)
       return;
 
+   if (tu6_format_is_yuv_render_target(attachment->format)) {
+      /* NV12 RT: no LOAD_OP_CLEAR (no usable 2D dest view; see tu6_emit_mrt).
+       * Apps must fully overwrite the attachment from the fragment shader. */
+      return;
+   }
+
    if (attachment->format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
       if (attachment->clear_mask & VK_IMAGE_ASPECT_DEPTH_BIT) {
          clear_sysmem_attachment<CHIP>(cmd, cs, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT,
@@ -5478,6 +5596,10 @@ tu7_generic_clear_attachment(struct tu_cmd_buffer *cmd,
    const VkClearValue *value = &cmd->state.clear_values[a];
    const struct tu_image_view *iview = cmd->state.attachments[a];
    const struct tu_subpass *subpass = cmd->state.subpass;
+
+   /* NV12 render targets have no GMEM clear path; apps must fully overwrite. */
+   if (tu6_format_is_yuv_render_target(att->format))
+      return;
 
    trace_start_generic_clear(&cmd->rp_trace, cs, cmd, att->format,
                              tu_image_view_fdl_view(iview, false)->ubwc_enabled, att->samples);
@@ -5927,6 +6049,22 @@ tu_load_gmem_attachment(struct tu_cmd_buffer *cmd,
    if (!load_common && !load_stencil)
       return;
 
+   /* NV12 render target: load the Y and UV planes into their two GMEM regions
+    * via per-plane BLIT_EVENT_LOAD.
+    */
+   if (tu6_format_is_yuv_render_target(attachment->format)) {
+      trace_start_gmem_load(&cmd->rp_trace, cs, cmd, attachment->format, force_load);
+      bool cond_exec = cond_exec_allowed && attachment->cond_load_allowed;
+      if (cond_exec)
+         tu_begin_load_store_cond_exec(cmd, cs, true);
+      tu_emit_blit_nv12<CHIP>(cmd, cs, resolve_group, iview, attachment,
+                              BLIT_EVENT_LOAD, per_layer_render_area);
+      if (cond_exec)
+         tu_end_load_store_cond_exec(cmd, cs, true);
+      trace_end_gmem_load(&cmd->rp_trace, cs);
+      return;
+   }
+
    trace_start_gmem_load(&cmd->rp_trace, cs, cmd, attachment->format, force_load);
 
    /* If attachment will be cleared by vkCmdClearAttachments - it is likely
@@ -6370,6 +6508,19 @@ tu_store_gmem_attachment(struct tu_cmd_buffer *cmd,
 
    if (!dst->store && !dst->store_stencil)
       return;
+
+   /* NV12 render target: store the Y and UV planes from their two GMEM regions
+    * via per-plane BLIT_EVENT_STORE.  Single-sample, non-resolve only.
+    */
+   if (tu6_format_is_yuv_render_target(dst->format)) {
+      if (!resolve && dst->samples == 1) {
+         trace_start_gmem_store(&cmd->rp_trace, cs, cmd, dst->format, true, false);
+         tu_emit_blit_nv12<CHIP>(cmd, cs, resolve_group, dst_iview, src,
+                                 BLIT_EVENT_STORE, per_layer_render_area);
+         trace_end_gmem_store(&cmd->rp_trace, cs);
+      }
+      return;
+   }
 
    bool unaligned = tu_attachment_store_unaligned(cmd, a);
    bool mismatched_mutability =

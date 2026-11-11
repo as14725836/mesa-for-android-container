@@ -374,7 +374,16 @@ impl<'a> ShaderFromNir<'a> {
                 | nir_op_vec3
                 | nir_op_vec4
                 | nir_op_vec5
+                | nir_op_vec6
+                | nir_op_vec7
                 | nir_op_vec8
+                | nir_op_vec9
+                | nir_op_vec10
+                | nir_op_vec11
+                | nir_op_vec12
+                | nir_op_vec13
+                | nir_op_vec14
+                | nir_op_vec15
                 | nir_op_vec16
         ) {
             let mut nsrcs = Vec::new();

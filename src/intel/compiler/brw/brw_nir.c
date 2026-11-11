@@ -1043,6 +1043,9 @@ brw_nir_should_vectorize_urb(unsigned align_mul, unsigned align_offset,
        low->intrinsic == nir_intrinsic_store_urb_lsc_intel)
       return false;
 
+   if (num_components > 5 && !util_is_power_of_two_nonzero(num_components))
+      return false;
+
    if (low->intrinsic == nir_intrinsic_store_urb_vec4_intel)
       return nir_src_is_const(low->src[3]) && nir_src_is_const(high->src[3]);
 
@@ -3126,6 +3129,9 @@ brw_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
             return false;
 
          if (num_components > 32)
+            return false;
+
+         if (num_components > 5 && !util_is_power_of_two_nonzero(num_components))
             return false;
 
          if (hole_size >= 8 * 4)

@@ -134,25 +134,61 @@ bi_vectorize_filter(const nir_instr *instr, const void *data)
    case nir_op_ball_fequal3:
    case nir_op_ball_fequal4:
    case nir_op_ball_fequal5:
+   case nir_op_ball_fequal6:
+   case nir_op_ball_fequal7:
    case nir_op_ball_fequal8:
+   case nir_op_ball_fequal9:
+   case nir_op_ball_fequal10:
+   case nir_op_ball_fequal11:
+   case nir_op_ball_fequal12:
+   case nir_op_ball_fequal13:
+   case nir_op_ball_fequal14:
+   case nir_op_ball_fequal15:
    case nir_op_ball_fequal16:
    case nir_op_bany_fnequal2:
    case nir_op_bany_fnequal3:
    case nir_op_bany_fnequal4:
    case nir_op_bany_fnequal5:
+   case nir_op_bany_fnequal6:
+   case nir_op_bany_fnequal7:
    case nir_op_bany_fnequal8:
+   case nir_op_bany_fnequal9:
+   case nir_op_bany_fnequal10:
+   case nir_op_bany_fnequal11:
+   case nir_op_bany_fnequal12:
+   case nir_op_bany_fnequal13:
+   case nir_op_bany_fnequal14:
+   case nir_op_bany_fnequal15:
    case nir_op_bany_fnequal16:
    case nir_op_ball_iequal2:
    case nir_op_ball_iequal3:
    case nir_op_ball_iequal4:
    case nir_op_ball_iequal5:
+   case nir_op_ball_iequal6:
+   case nir_op_ball_iequal7:
    case nir_op_ball_iequal8:
+   case nir_op_ball_iequal9:
+   case nir_op_ball_iequal10:
+   case nir_op_ball_iequal11:
+   case nir_op_ball_iequal12:
+   case nir_op_ball_iequal13:
+   case nir_op_ball_iequal14:
+   case nir_op_ball_iequal15:
    case nir_op_ball_iequal16:
    case nir_op_bany_inequal2:
    case nir_op_bany_inequal3:
    case nir_op_bany_inequal4:
    case nir_op_bany_inequal5:
+   case nir_op_bany_inequal6:
+   case nir_op_bany_inequal7:
    case nir_op_bany_inequal8:
+   case nir_op_bany_inequal9:
+   case nir_op_bany_inequal10:
+   case nir_op_bany_inequal11:
+   case nir_op_bany_inequal12:
+   case nir_op_bany_inequal13:
+   case nir_op_bany_inequal14:
+   case nir_op_bany_inequal15:
    case nir_op_bany_inequal16:
       return 1;
    case nir_op_pack_uvec2_to_uint:

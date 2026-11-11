@@ -270,9 +270,7 @@ static inline bool
 nir_num_components_valid(unsigned num_components)
 {
    return (num_components >= 1 &&
-           num_components <= 5) ||
-          num_components == 8 ||
-          num_components == 16;
+           num_components <= 16);
 }
 
 static inline unsigned

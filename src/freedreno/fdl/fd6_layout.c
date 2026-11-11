@@ -34,17 +34,26 @@ fdl6_get_ubwc_blockwidth(const struct fdl_layout *layout,
       {  0, 0 }, /* cpp = 128 */
    };
 
-   unsigned num_planes = util_format_get_num_planes(layout->format);
+   /* P010 luma plane (R10X6) uses a 32x4 UBWC block. */
+   if (layout->format == PIPE_FORMAT_X6R10_UNORM) {
+      *blockwidth = 32;
+      *blockheight = 4;
+      return;
+   }
 
    /* special case for r8g8 and UV plane (plane 1) of 2-plane YUV formats */
-   if (fdl6_is_r8g8_layout(layout) || (num_planes == 2 && layout->plane == 1)) {
+   if (fdl6_is_r8g8_layout(layout) ||
+       ((layout->format == PIPE_FORMAT_R8_G8B8_420_UNORM) && (layout->plane == 1)) ||
+       fdl6_is_yuv_uv_plane(layout)) {
       *blockwidth = 16;
       *blockheight = 8;
       return;
    }
 
    /* special handling for y8_unorm and Y plane (plane 0) of 2-plane YUV formats */
-   if ((layout->format == PIPE_FORMAT_Y8_UNORM) || (num_planes == 2 && layout->plane == 0)) {
+   if ((layout->format == PIPE_FORMAT_Y8_UNORM) ||
+       ((layout->format == PIPE_FORMAT_R8_G8B8_420_UNORM) && (layout->plane == 0)) ||
+       ((layout->format == PIPE_FORMAT_Y8_U8V8_420_UNORM) && (layout->plane == 0))) {
       *blockwidth = 32;
       *blockheight = 8;
       return;
@@ -81,7 +90,12 @@ fdl6_tile_alignment(struct fdl_layout *layout, uint32_t *heightalign)
    layout->pitchalign = fdl_cpp_shift(layout);
    *heightalign = 16;
 
-   if (fdl6_is_r8g8_layout(layout) || layout->cpp == 1) {
+   /* The NV12 UV plane needs r8g8 tile alignment even when the parent image
+    * is mutable; fdl6_is_r8g8_layout()'s mutable guard would otherwise
+    * under-allocate it.
+    */
+   if (fdl6_is_r8g8_layout(layout) || layout->cpp == 1 ||
+       fdl6_is_yuv_uv_plane(layout)) {
       layout->pitchalign = 1;
       *heightalign = 32;
    } else if (layout->cpp == 2) {

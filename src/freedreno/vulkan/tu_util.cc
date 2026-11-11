@@ -60,6 +60,10 @@ static const struct debug_control tu_debug_options[] = {
    { NULL, 0 }
 };
 
+static const struct debug_control tu_experimental_options[] = {
+   {"descriptor_heap", TU_EXPERIMENTAL_DESCRIPTOR_HEAP },
+};
+
 /*
  * The runtime debug flags are a subset of the debug flags that can be set at
  * runtime. Flags which depend on running state of the driver, the application
@@ -130,6 +134,7 @@ static void
 tu_env_init_once(void)
 {
    tu_env.start_debug = tu_env.debug = parse_debug_string(os_get_option("TU_DEBUG"), tu_debug_options);
+   tu_env.experimental = parse_debug_string(os_get_option("TU_EXPERIMENTAL"), tu_experimental_options);
 
    if (TU_DEBUG(STARTUP))
       mesa_logi("TU_DEBUG=0x%" PRIx64, tu_env.debug.load());

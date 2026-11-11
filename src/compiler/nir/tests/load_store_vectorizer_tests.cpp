@@ -84,7 +84,7 @@ protected:
    std::map<unsigned, nir_alu_src*> loads;
    std::map<unsigned, nir_def*> res_map;
    unsigned max_components = 4;
-   bool overfetch = false;
+   bool disallow_npot = false;
    int64_t max_hole_size = 0;
 };
 
@@ -145,6 +145,7 @@ nir_load_store_vectorize_test::run_vectorizer(nir_variable_mode modes,
 
    nir_load_store_vectorize_options opts = { };
    opts.callback = mem_vectorize_callback;
+   opts.round_up_components = disallow_npot ? util_next_power_of_two : NULL;
    opts.modes = modes;
    opts.robust_modes = robust_modes;
    opts.bounds_checked_modes = bounds_checked_modes;
@@ -361,7 +362,8 @@ bool nir_load_store_vectorize_test::mem_vectorize_callback(
    nir_load_store_vectorize_test *test = (nir_load_store_vectorize_test *)data;
 
    if (hole_size > test->max_hole_size ||
-       (!test->overfetch && !nir_num_components_valid(num_components)))
+       !nir_num_components_valid(num_components) ||
+       num_components > test->max_components)
       return false;
 
    /* Calculate a simple alignment, like how nir_intrinsic_align() does. */
@@ -370,8 +372,7 @@ bool nir_load_store_vectorize_test::mem_vectorize_callback(
       align = 1 << (ffs(align_offset) - 1);
 
    /* Require scalar alignment and less than 5 components. */
-   return align % (bit_size / 8) == 0 &&
-          (test->overfetch || num_components <= test->max_components);
+   return align % (bit_size / 8) == 0;
 }
 
 void nir_load_store_vectorize_test::shared_type_info(
@@ -2147,9 +2148,11 @@ TEST_F(nir_load_store_vectorize_test, ubo_overfetch_vec6_as_vec8)
    nir_validate_shader(b->shader, NULL);
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 2);
 
-   this->overfetch = true;
+   this->disallow_npot = true;
+   this->max_components = 8;
    EXPECT_TRUE(run_vectorizer(nir_var_mem_ubo));
-   this->overfetch = false;
+   this->max_components = 4;
+   this->disallow_npot = false;
 
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 1);
 
@@ -2172,9 +2175,11 @@ TEST_F(nir_load_store_vectorize_test, ubo_overfetch_vec7_as_vec8)
    nir_validate_shader(b->shader, NULL);
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 2);
 
-   this->overfetch = true;
+   this->disallow_npot = true;
+   this->max_components = 8;
    EXPECT_TRUE(run_vectorizer(nir_var_mem_ubo));
-   this->overfetch = false;
+   this->max_components = 4;
+   this->disallow_npot = false;
 
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 1);
 
@@ -2209,9 +2214,11 @@ TEST_F(nir_load_store_vectorize_test, ubo_overfetch_vec11_as_vec16)
    nir_validate_shader(b->shader, NULL);
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 2);
 
-   this->overfetch = true;
+   this->disallow_npot = true;
+   this->max_components = 16;
    EXPECT_TRUE(run_vectorizer(nir_var_mem_ubo));
-   this->overfetch = false;
+   this->max_components = 4;
+   this->disallow_npot = false;
 
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 1);
 
@@ -2330,19 +2337,19 @@ TEST_F(nir_load_store_vectorize_test, ubo_vec3_hole1_vec3)
    nir_validate_shader(b->shader, NULL);
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 2);
 
-   this->overfetch = true;
+   this->max_components = 8;
    this->max_hole_size = 4;
    EXPECT_TRUE(run_vectorizer(nir_var_mem_ubo));
    this->max_hole_size = 0;
-   this->overfetch = false;
+   this->max_components = 4;
 
    ASSERT_EQ(count_intrinsics(nir_intrinsic_load_ubo), 1);
 
    nir_intrinsic_instr *load = get_intrinsic(nir_intrinsic_load_ubo, 0);
    ASSERT_EQ(load->def.bit_size, 32);
-   ASSERT_EQ(load->def.num_components, 8);
+   ASSERT_EQ(load->def.num_components, 7);
    ASSERT_EQ(nir_intrinsic_range_base(load), 0);
-   ASSERT_EQ(nir_intrinsic_range(load), 32);
+   ASSERT_EQ(nir_intrinsic_range(load), 28);
    ASSERT_EQ(nir_def_components_read(&load->def), 0x77);
    ASSERT_EQ(nir_src_as_uint(load->src[1]), 0);
    EXPECT_INSTR_SWIZZLES(movs[0x1], load, "xyz");

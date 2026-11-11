@@ -35,6 +35,14 @@ struct tu_image
       struct tu_sparse_vma vma;
    };
 
+   /* Per-plane memory for disjoint multi-plane images */
+   struct {
+      struct tu_device_memory *mem;
+      uint64_t mem_offset;
+      uint64_t iova;
+   } plane_mem[TU_MAX_PLANE_COUNT];
+   bool disjoint;
+
    /* For fragment density map */
    void *map;
 
@@ -51,6 +59,14 @@ struct tu_image
    uint64_t id;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)
+
+/* Base iova of a plane: disjoint images bind each plane in its own memory,
+ * so image->iova is unset (0) and the per-plane binding must be used. */
+static inline uint64_t
+tu_image_plane_iova(const struct tu_image *image, uint32_t plane)
+{
+   return image->disjoint ? image->plane_mem[plane].iova : image->iova;
+}
 
 enum tu_image_id_mode {
    /* Temporaries for memory-requirement queries: no identity, must never
@@ -109,6 +125,15 @@ tu_image_view_init(struct tu_device *device,
                    const VkImageViewCreateInfo *pCreateInfo);
 
 uint32_t tu6_plane_count(VkFormat format);
+
+/* A YUV format that turnip renders via the special NV12 MRT path in
+ * tu6_emit_mrt() (Y plane + UV plane) rather than a plain color attachment.
+ */
+static inline bool
+tu6_format_is_yuv_render_target(VkFormat format)
+{
+   return format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+}
 
 enum pipe_format tu6_plane_format(VkFormat format, uint32_t plane);
 

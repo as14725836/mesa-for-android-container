@@ -93,9 +93,9 @@ class Opcode(object):
       assert isinstance(const_expr, str)
       assert len(input_sizes) == len(input_types)
       assert len(input_sizes) == 2 or "associative" not in algebraic_properties
-      assert 0 <= output_size <= 5 or (output_size == 8) or (output_size == 16)
+      assert 0 <= output_size <= 16
       for size in input_sizes:
-         assert 0 <= size <= 5 or (size == 8) or (size == 16)
+         assert 0 <= size <= 16
          if output_size != 0:
             assert size != 0
       self.name = name
@@ -688,20 +688,12 @@ def binop_reduce(name, output_size, output_type, src_type, prereduce_expr,
    def pairwise_reduce(start, size):
       if (size == 1):
          return srcs[start]
-      return reduce_(pairwise_reduce(start + size // 2, size // 2), pairwise_reduce(start, size // 2))
-   for size in [2, 4, 8, 16]:
+      return reduce_(pairwise_reduce(start, size // 2),
+                     pairwise_reduce(start + size // 2, size - size // 2))
+   for size in range(2, 17):
       opcode(name + str(size) + suffix, output_size, output_type,
              [size, size], [src_type, src_type], False, _2src_commutative,
              final(pairwise_reduce(0, size)), description, False, valid_fp_math_ctrl)
-   opcode(name + "3" + suffix, output_size, output_type,
-          [3, 3], [src_type, src_type], False, _2src_commutative,
-          final(reduce_(reduce_(srcs[2], srcs[1]), srcs[0])), description,
-          False, valid_fp_math_ctrl)
-   opcode(name + "5" + suffix, output_size, output_type,
-          [5, 5], [src_type, src_type], False, _2src_commutative,
-          final(reduce_(srcs[4], reduce_(reduce_(srcs[3], srcs[2]),
-                                         reduce_(srcs[1], srcs[0])))),
-          description, False, valid_fp_math_ctrl)
 
 def binop_reduce_all_sizes(name, output_size, src_type, prereduce_expr,
                            reduce_expr, final_expr, description = ""):
@@ -1091,13 +1083,6 @@ if (!isnormal(dst))
 
 binop("fcopysign_pco", tfloat, "", "bit_size == 64 ? copysign(src0, src1) : copysignf(src0, src1)")
 
-binop_horiz("vec2", 2, tuint, 1, tuint, 1, tuint, """
-dst.x = src0.x;
-dst.y = src1.x;
-""", description = """
-Combines the first component of each input to make a 2-component vector.
-""")
-
 def extract_insert_op(name, ty, expr):
    if name.endswith("16"):
      width = 16
@@ -1362,14 +1347,6 @@ dst.z = msad(src0.x, src >> 16, src2.z);
 dst.w = msad(src0.x, src >> 24, src2.w);
 """)
 
-# Combines the first component of each input to make a 3-component vector.
-
-triop_horiz("vec3", 3, 1, 1, 1, """
-dst.x = src0.x;
-dst.y = src1.x;
-dst.z = src2.x;
-""")
-
 def quadop_horiz(name, output_size, src1_size, src2_size, src3_size,
                  src4_size, const_expr):
    opcode(name, output_size, tuint,
@@ -1403,56 +1380,13 @@ unsigned mask = ((1ull << bits) - 1) << offset;
 dst = (base & ~mask) | ((insert << offset) & mask);
 """)
 
-quadop_horiz("vec4", 4, 1, 1, 1, 1, """
-dst.x = src0.x;
-dst.y = src1.x;
-dst.z = src2.x;
-dst.w = src3.x;
-""")
-
-opcode("vec5", 5, tuint,
-       [1] * 5, [tuint] * 5,
-       False, "", """
-dst.x = src0.x;
-dst.y = src1.x;
-dst.z = src2.x;
-dst.w = src3.x;
-dst.e = src4.x;
-""")
-
-opcode("vec8", 8, tuint,
-       [1] * 8, [tuint] * 8,
-       False, "", """
-dst.x = src0.x;
-dst.y = src1.x;
-dst.z = src2.x;
-dst.w = src3.x;
-dst.e = src4.x;
-dst.f = src5.x;
-dst.g = src6.x;
-dst.h = src7.x;
-""")
-
-opcode("vec16", 16, tuint,
-       [1] * 16, [tuint] * 16,
-       False, "", """
-dst.x = src0.x;
-dst.y = src1.x;
-dst.z = src2.x;
-dst.w = src3.x;
-dst.e = src4.x;
-dst.f = src5.x;
-dst.g = src6.x;
-dst.h = src7.x;
-dst.i = src8.x;
-dst.j = src9.x;
-dst.k = src10.x;
-dst.l = src11.x;
-dst.m = src12.x;
-dst.n = src13.x;
-dst.o = src14.x;
-dst.p = src15.x;
-""")
+# Combines the first component of each input to make a vector.
+for i in range(2, 17):
+   expr = ""
+   for j in range(i):
+      swizzle = "xyzwefghijklmnop"[j]
+      expr += f"dst.{swizzle} = src{j}.x;\n"
+   opcode(f"vec{i}", i, tuint, [1] * i, [tuint] * i, False, "", expr)
 
 # An integer multiply instruction for address calculation.  This is
 # similar to imul, except that the results are undefined in case of

@@ -759,7 +759,16 @@ lower_bit_size_cb(const nir_instr *instr, void *_data)
         case nir_op_vec3:
         case nir_op_vec4:
         case nir_op_vec5:
+        case nir_op_vec6:
+        case nir_op_vec7:
         case nir_op_vec8:
+        case nir_op_vec9:
+        case nir_op_vec10:
+        case nir_op_vec11:
+        case nir_op_vec12:
+        case nir_op_vec13:
+        case nir_op_vec14:
+        case nir_op_vec15:
         case nir_op_vec16:
         case nir_op_b2i8:
         case nir_op_b2f16:

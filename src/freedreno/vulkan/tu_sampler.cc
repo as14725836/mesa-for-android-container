@@ -13,80 +13,27 @@
 #include "tu_util.h"
 
 template <chip CHIP>
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_CreateSampler(VkDevice _device,
-                 const VkSamplerCreateInfo *pCreateInfo,
-                 const VkAllocationCallbacks *pAllocator,
-                 VkSampler *pSampler)
+void
+tu_get_sampler_descriptor(struct tu_device *device,
+                          const struct vk_sampler_state *sampler,
+                          uint32_t custom_border_color_index,
+                          uint32_t *descriptor)
 {
-   VK_FROM_HANDLE(tu_device, device, _device);
-   struct tu_sampler *sampler;
-
-   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
-
-   sampler = static_cast<struct tu_sampler *>(vk_sampler_create(
-      &device->vk, pCreateInfo, pAllocator, sizeof(*sampler)));
-   if (!sampler)
-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
-
    bool fast_border_color_enable = false;
    enum a6xx_fast_border_color fast_border_color = A6XX_BORDER_COLOR_0_0_0_0;
 
-   const struct VkSamplerYcbcrConversionInfo *ycbcr_conversion =
-      vk_find_struct_const(pCreateInfo->pNext,  SAMPLER_YCBCR_CONVERSION_INFO);
-   uint32_t border_color = static_cast<unsigned>(pCreateInfo->borderColor);
-   if (vk_border_color_is_custom(pCreateInfo->borderColor)) {
-      uint32_t border_color_index = 0;
-      bool replay = false;
-
-      const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_info =
-         vk_find_struct_const(pCreateInfo->pNext,
-                              OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
-      if (opaque_info && opaque_info->opaqueCaptureDescriptorData) {
-         replay = true;
-         border_color_index =
-            *static_cast<const uint32_t *>(opaque_info->opaqueCaptureDescriptorData);
-      }
-
-      mtx_lock(&device->mutex);
-      if (replay) {
-         if (border_color_index >= TU_BORDER_COLOR_COUNT ||
-             !BITSET_TEST(device->custom_border_color, border_color_index)) {
-            mtx_unlock(&device->mutex);
-            vk_sampler_destroy(&device->vk, pAllocator, &sampler->vk);
-            return vk_error(device, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
-         }
-      } else {
-         border_color_index = BITSET_FFS(device->custom_border_color) - 1;
-         assert(border_color_index < TU_BORDER_COLOR_COUNT);
-      }
-      BITSET_CLEAR(device->custom_border_color, border_color_index);
-      mtx_unlock(&device->mutex);
-
-      sampler->custom_border_color = true;
-      sampler->border_color_index = border_color_index;
-
-      VkClearColorValue color = sampler->vk.border_color_value;
-      if (sampler->vk.format == VK_FORMAT_D24_UNORM_S8_UINT &&
-          pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT &&
-          device->use_z24uint_s8uint) {
-         /* When sampling stencil using the special Z24UINT_S8UINT format, the
-          * border color is in the second component. Note: if
-          * customBorderColorWithoutFormat is enabled, we may miss doing this
-          * here if the format isn't specified, which is why we don't use that
-          * format.
-          */
-         color.uint32[1] = color.uint32[0];
-      }
-
-      tu6_pack_border_color(
-         &device->global_bo_map->bcolor[border_color_index], &color,
-         pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT);
-      border_color = border_color_index + TU_BORDER_COLOR_BUILTIN;
-   } else if (sampler->vk.format != VK_FORMAT_UNDEFINED ||
-              device->instance->drirc.misc.enable_fast_border_color_for_undefined_formats) {
+   /* The first border colors in the table correspond to the standard Vulkan
+    * border colors.
+    */
+   uint32_t border_color = (unsigned) sampler->border_color;
+   if (vk_border_color_is_custom(sampler->border_color)) {
+      border_color = 2 * custom_border_color_index +
+         (unsigned)(sampler->border_color == VK_BORDER_COLOR_INT_CUSTOM_EXT) +
+                    TU_BORDER_COLOR_BUILTIN;
+   } else if (sampler->format != VK_FORMAT_UNDEFINED ||
+        device->instance->drirc.misc.enable_fast_border_color_for_undefined_formats) {
       fast_border_color_enable = true;
-      switch (pCreateInfo->borderColor) {
+      switch (sampler->border_color) {
          case VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK:
          case VK_BORDER_COLOR_INT_TRANSPARENT_BLACK:
             fast_border_color = A6XX_BORDER_COLOR_0_0_0_0;
@@ -104,86 +51,233 @@ tu_CreateSampler(VkDevice _device,
       }
    }
 
-   unsigned aniso = pCreateInfo->anisotropyEnable ?
-      util_last_bit(MIN2(static_cast<uint32_t>(pCreateInfo->maxAnisotropy) >> 1, 8)) : 0;
-   bool miplinear = (pCreateInfo->mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR);
-   float min_lod = CLAMP(pCreateInfo->minLod, 0.0f, 4095.0f / 256.0f);
-   float max_lod = CLAMP(pCreateInfo->maxLod, 0.0f, 4095.0f / 256.0f);
-
-   sampler->vk.ycbcr_conversion = ycbcr_conversion ?
-      vk_ycbcr_conversion_from_handle(ycbcr_conversion->conversion) : NULL;
+   unsigned aniso = sampler->anisotropy_enable ?
+      util_last_bit(MIN2(static_cast<uint32_t>(sampler->max_anisotropy) >> 1, 8)) : 0;
+   bool miplinear = (sampler->mipmap_mode == VK_SAMPLER_MIPMAP_MODE_LINEAR);
+   float min_lod = CLAMP(sampler->min_lod, 0.0f, 4095.0f / 256.0f);
+   float max_lod = CLAMP(sampler->max_lod, 0.0f, 4095.0f / 256.0f);
 
    if (CHIP >= A8XX) {
-      sampler->descriptor[0] =
+      descriptor[0] =
          COND(miplinear, A8XX_TEX_SAMP_0_MIPFILTER_LINEAR_NEAR) |
-         A8XX_TEX_SAMP_0_XY_MAG(tu6_tex_filter(pCreateInfo->magFilter, aniso)) |
-         A8XX_TEX_SAMP_0_XY_MIN(tu6_tex_filter(pCreateInfo->minFilter, aniso)) |
-         A8XX_TEX_SAMP_0_WRAP_S(tu6_tex_wrap(pCreateInfo->addressModeU)) |
-         A8XX_TEX_SAMP_0_WRAP_T(tu6_tex_wrap(pCreateInfo->addressModeV)) |
-         A8XX_TEX_SAMP_0_WRAP_R(tu6_tex_wrap(pCreateInfo->addressModeW)) |
-         A8XX_TEX_SAMP_0_LOD_BIAS(pCreateInfo->mipLodBias) |
+         A8XX_TEX_SAMP_0_XY_MAG(tu6_tex_filter(sampler->mag_filter, aniso)) |
+         A8XX_TEX_SAMP_0_XY_MIN(tu6_tex_filter(sampler->min_filter, aniso)) |
+         A8XX_TEX_SAMP_0_WRAP_S(tu6_tex_wrap(sampler->address_mode_u)) |
+         A8XX_TEX_SAMP_0_WRAP_T(tu6_tex_wrap(sampler->address_mode_v)) |
+         A8XX_TEX_SAMP_0_WRAP_R(tu6_tex_wrap(sampler->address_mode_w)) |
+         A8XX_TEX_SAMP_0_LOD_BIAS(sampler->mip_lod_bias) |
          A8XX_TEX_SAMP_0_ANISO(static_cast<enum a6xx_tex_aniso>(aniso));
 
-      sampler->descriptor[1] =
+      descriptor[1] =
          A8XX_TEX_SAMP_1_MAX_LOD(max_lod) |
          A8XX_TEX_SAMP_1_MIN_LOD(min_lod) |
-         COND(pCreateInfo->compareEnable, A8XX_TEX_SAMP_1_COMPARE_FUNC(tu6_compare_func(pCreateInfo->compareOp))) |
-         COND(pCreateInfo->flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT,
+         COND(sampler->compare_enable, A8XX_TEX_SAMP_1_COMPARE_FUNC(tu6_compare_func(sampler->compare_op))) |
+         COND(sampler->flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT,
             A8XX_TEX_SAMP_1_CUBEMAPSEAMLESSFILTOFF) |
-         COND(pCreateInfo->unnormalizedCoordinates, A8XX_TEX_SAMP_1_UNNORM_COORDS);
-      sampler->descriptor[2] =
+         COND(sampler->unnormalized_coordinates, A8XX_TEX_SAMP_1_UNNORM_COORDS);
+      descriptor[2] =
          A8XX_TEX_SAMP_2_BCOLOR(border_color) |
          A8XX_TEX_SAMP_2_FASTBORDERCOLOR(fast_border_color) |
          COND(fast_border_color_enable, A8XX_TEX_SAMP_2_FASTBORDERCOLOREN);
-      sampler->descriptor[3] = 0;
+      descriptor[3] = 0;
 
-      if (sampler->vk.reduction_mode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE) {
-         sampler->descriptor[1] |= A8XX_TEX_SAMP_1_REDUCTION_MODE(
-            tu6_reduction_mode(sampler->vk.reduction_mode));
+      if (sampler->reduction_mode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE) {
+         descriptor[1] |= A8XX_TEX_SAMP_1_REDUCTION_MODE(
+            tu6_reduction_mode(sampler->reduction_mode));
       }
 
-      if (sampler->vk.ycbcr_conversion &&
-          sampler->vk.ycbcr_conversion->state.chroma_filter == VK_FILTER_LINEAR) {
-         sampler->descriptor[1] |= A8XX_TEX_SAMP_1_CHROMA_LINEAR;
+      if (sampler->has_ycbcr_conversion &&
+          sampler->ycbcr_conversion.chroma_filter == VK_FILTER_LINEAR) {
+         descriptor[1] |= A8XX_TEX_SAMP_1_CHROMA_LINEAR;
       }
    } else {
-      sampler->descriptor[0] =
+      descriptor[0] =
          COND(miplinear, A6XX_TEX_SAMP_0_MIPFILTER_LINEAR_NEAR) |
-         A6XX_TEX_SAMP_0_XY_MAG(tu6_tex_filter(pCreateInfo->magFilter, aniso)) |
-         A6XX_TEX_SAMP_0_XY_MIN(tu6_tex_filter(pCreateInfo->minFilter, aniso)) |
+         A6XX_TEX_SAMP_0_XY_MAG(tu6_tex_filter(sampler->mag_filter, aniso)) |
+         A6XX_TEX_SAMP_0_XY_MIN(tu6_tex_filter(sampler->min_filter, aniso)) |
          A6XX_TEX_SAMP_0_ANISO(static_cast<enum a6xx_tex_aniso>(aniso)) |
-         A6XX_TEX_SAMP_0_WRAP_S(tu6_tex_wrap(pCreateInfo->addressModeU)) |
-         A6XX_TEX_SAMP_0_WRAP_T(tu6_tex_wrap(pCreateInfo->addressModeV)) |
-         A6XX_TEX_SAMP_0_WRAP_R(tu6_tex_wrap(pCreateInfo->addressModeW)) |
-         A6XX_TEX_SAMP_0_LOD_BIAS(pCreateInfo->mipLodBias);
-      sampler->descriptor[1] =
-         COND(pCreateInfo->flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT,
+         A6XX_TEX_SAMP_0_WRAP_S(tu6_tex_wrap(sampler->address_mode_u)) |
+         A6XX_TEX_SAMP_0_WRAP_T(tu6_tex_wrap(sampler->address_mode_v)) |
+         A6XX_TEX_SAMP_0_WRAP_R(tu6_tex_wrap(sampler->address_mode_w)) |
+         A6XX_TEX_SAMP_0_LOD_BIAS(sampler->mip_lod_bias);
+      descriptor[1] =
+         COND(sampler->flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT,
             A6XX_TEX_SAMP_1_CUBEMAPSEAMLESSFILTOFF) |
-         COND(pCreateInfo->unnormalizedCoordinates, A6XX_TEX_SAMP_1_UNNORM_COORDS) |
+         COND(sampler->unnormalized_coordinates, A6XX_TEX_SAMP_1_UNNORM_COORDS) |
          A6XX_TEX_SAMP_1_MIN_LOD(min_lod) |
          A6XX_TEX_SAMP_1_MAX_LOD(max_lod) |
-         COND(pCreateInfo->compareEnable,
-            A6XX_TEX_SAMP_1_COMPARE_FUNC(tu6_compare_func(pCreateInfo->compareOp)));
-      sampler->descriptor[2] =
+         COND(sampler->compare_enable,
+            A6XX_TEX_SAMP_1_COMPARE_FUNC(tu6_compare_func(sampler->compare_op)));
+      descriptor[2] =
          A6XX_TEX_SAMP_2_BCOLOR(border_color) |
          A6XX_TEX_SAMP_2_FASTBORDERCOLOR(fast_border_color) |
          COND(fast_border_color_enable, A6XX_TEX_SAMP_2_FASTBORDERCOLOREN);
-      sampler->descriptor[3] = 0;
+      descriptor[3] = 0;
 
-      if (sampler->vk.reduction_mode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE) {
-         sampler->descriptor[2] |= A6XX_TEX_SAMP_2_REDUCTION_MODE(
-            tu6_reduction_mode(sampler->vk.reduction_mode));
+      if (sampler->reduction_mode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE) {
+         descriptor[2] |= A6XX_TEX_SAMP_2_REDUCTION_MODE(
+            tu6_reduction_mode(sampler->reduction_mode));
       }
 
-      if (sampler->vk.ycbcr_conversion &&
-          sampler->vk.ycbcr_conversion->state.chroma_filter == VK_FILTER_LINEAR) {
-         sampler->descriptor[2] |= A6XX_TEX_SAMP_2_CHROMA_LINEAR;
+      if (sampler->has_ycbcr_conversion &&
+          sampler->ycbcr_conversion.chroma_filter == VK_FILTER_LINEAR) {
+         descriptor[2] |= A6XX_TEX_SAMP_2_CHROMA_LINEAR;
       }
    }
 
    /* TODO:
     * A6XX_TEX_SAMP_1_MIPFILTER_LINEAR_FAR disables mipmapping, but vk has no NONE mipfilter?
     */
+}
+TU_GENX(tu_get_sampler_descriptor);
+
+static VkResult
+tu_register_border_color(struct tu_device *device,
+                         const VkClearColorValue *border_color,
+                         VkFormat format,
+                         bool replay,
+                         uint32_t *border_color_index)
+{
+   mtx_lock(&device->mutex);
+   if (replay) {
+      if (*border_color_index >= TU_BORDER_COLOR_COUNT ||
+          !BITSET_TEST(device->custom_border_color, *border_color_index)) {
+         mtx_unlock(&device->mutex);
+         return vk_error(device, VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS);
+      }
+   } else {
+      *border_color_index = BITSET_FFS(device->custom_border_color) - 1;
+      if (*border_color_index >= TU_BORDER_COLOR_COUNT) {
+         mtx_unlock(&device->mutex);
+         return vk_error(device, VK_ERROR_TOO_MANY_OBJECTS);
+      }
+   }
+   BITSET_CLEAR(device->custom_border_color, *border_color_index);
+   mtx_unlock(&device->mutex);
+
+   for (unsigned i = 0; i < 2; i++) {
+      bool is_int = i == 1;
+      VkClearColorValue color = *border_color;
+
+      if (format == VK_FORMAT_D24_UNORM_S8_UINT &&
+          is_int && device->use_z24uint_s8uint) {
+         /* When sampling stencil using the special Z24UINT_S8UINT format, the
+          * border color is in the second component. Note: if
+          * customBorderColorWithoutFormat is enabled, we may miss doing this
+          * here if the format isn't specified, which is why we don't use that
+          * format.
+          */
+         color.uint32[1] = color.uint32[0];
+      }
+
+      tu6_pack_border_color(
+         &device->global_bo_map->bcolor[*border_color_index * 2 + i], &color,
+         is_int);
+   }
+
+   return VK_SUCCESS;
+}
+
+static void
+tu_unregister_border_color(struct tu_device *device, uint32_t index)
+{
+   mtx_lock(&device->mutex);
+   BITSET_SET(device->custom_border_color, index);
+   mtx_unlock(&device->mutex);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_RegisterCustomBorderColorEXT(
+    VkDevice                                        _device,
+    const VkSamplerCustomBorderColorCreateInfoEXT*  pBorderColor,
+    VkBool32                                        requestIndex,
+    uint32_t*                                       pIndex)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+
+   return tu_register_border_color(device, &pBorderColor->customBorderColor,
+                                   pBorderColor->format, requestIndex,
+                                   pIndex);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+tu_UnregisterCustomBorderColorEXT(
+    VkDevice                                        _device,
+    uint32_t                                        index)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+
+   tu_unregister_border_color(device, index);
+}
+
+template <chip CHIP>
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_CreateSampler(VkDevice _device,
+                 const VkSamplerCreateInfo *pCreateInfo,
+                 const VkAllocationCallbacks *pAllocator,
+                 VkSampler *pSampler)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+   struct tu_sampler *sampler;
+
+   assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
+
+   sampler = static_cast<struct tu_sampler *>(vk_sampler_create(
+      &device->vk, pCreateInfo, pAllocator, sizeof(*sampler)));
+   if (!sampler)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   uint32_t custom_border_color_index = 0;
+   if (vk_border_color_is_custom(pCreateInfo->borderColor)) {
+      const VkSamplerCustomBorderColorIndexCreateInfoEXT *border_color_info =
+         vk_find_struct_const(pCreateInfo->pNext,
+                              SAMPLER_CUSTOM_BORDER_COLOR_INDEX_CREATE_INFO_EXT);
+
+      if (border_color_info) {
+         custom_border_color_index = border_color_info->index;
+         /* We purposefully don't store the index in the sampler so that it
+          * isn't automatically unregistered. It's the user's responsibility
+          * to unregister the index, since they registered it themselves. We
+          * also don't check whether it's registered, since it's allowed to
+          * register it later.
+          */
+      } else {
+         bool replay = false;
+
+         const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_info =
+            vk_find_struct_const(pCreateInfo->pNext,
+                                 OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
+         if (opaque_info && opaque_info->opaqueCaptureDescriptorData) {
+            replay = true;
+            custom_border_color_index =
+               *static_cast<const uint32_t *>(opaque_info->opaqueCaptureDescriptorData);
+         }
+
+         VkResult result =
+            tu_register_border_color(device, &sampler->vk.border_color_value,
+                                     sampler->vk.format, replay,
+                                     &custom_border_color_index);
+         if (result != VK_SUCCESS) {
+            vk_sampler_destroy(&device->vk, pAllocator, &sampler->vk);
+            return result;
+         }
+
+         sampler->custom_border_color = true;
+         sampler->border_color_index = custom_border_color_index;
+      }
+   }
+
+   struct vk_sampler_state state;
+   vk_sampler_state_init(&state, pCreateInfo);
+
+   tu_get_sampler_descriptor<CHIP>(device, &state, custom_border_color_index,
+                                   sampler->descriptor);
+
+   const struct VkSamplerYcbcrConversionInfo *ycbcr_conversion =
+      vk_find_struct_const(pCreateInfo->pNext,  SAMPLER_YCBCR_CONVERSION_INFO);
+
+   sampler->vk.ycbcr_conversion = ycbcr_conversion ?
+      vk_ycbcr_conversion_from_handle(ycbcr_conversion->conversion) : NULL;
 
    *pSampler = tu_sampler_to_handle(sampler);
 
@@ -204,11 +298,8 @@ tu_DestroySampler(VkDevice _device,
       return;
 
    if (sampler->custom_border_color) {
-      /* if the sampler had a custom border color, free it. TODO: no lock */
-      mtx_lock(&device->mutex);
-      assert(!BITSET_TEST(device->custom_border_color, sampler->border_color_index));
-      BITSET_SET(device->custom_border_color, sampler->border_color_index);
-      mtx_unlock(&device->mutex);
+      /* if the sampler had a custom border color, free it. */
+      tu_unregister_border_color(device, sampler->border_color_index);
    }
 
    vk_sampler_destroy(&device->vk, pAllocator, &sampler->vk);

@@ -129,13 +129,13 @@ typedef uint16_t nir_component_mask_t;
 static inline unsigned
 nir_round_up_components(unsigned n)
 {
-   return (n > 5) ? util_next_power_of_two(n) : n;
+   return n;
 }
 
 static inline unsigned
 nir_round_down_components(unsigned n)
 {
-   return (n > 5) ? MAX2(1 << util_logbase2(n), 5) : n;
+   return n;
 }
 
 static inline nir_component_mask_t

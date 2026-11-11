@@ -135,6 +135,12 @@ struct tu_render_pass_attachment
 
    int32_t gmem_offset_stencil[TU_GMEM_LAYOUT_COUNT];
 
+   /* NV12 (2-plane 420 YUV) render targets occupy two GMEM regions: the Y
+    * plane uses gmem_offset[] above, the UV (chroma) plane uses this. See
+    * tu6_emit_mrt() and tu_attachment_gmem_offset_uv().
+    */
+   int32_t gmem_offset_uv[TU_GMEM_LAYOUT_COUNT];
+
    /* The subpass id in which the attachment will be used first/last. */
    uint32_t first_subpass_idx;
    uint32_t last_subpass_idx;

@@ -2857,13 +2857,10 @@ emit_alu(struct ntd_context *ctx, nir_alu_instr *alu)
    /* handle vec-instructions first; they are the only ones that produce
     * vector results.
     */
-   switch (alu->op) {
-   case nir_op_vec2:
-   case nir_op_vec3:
-   case nir_op_vec4:
-   case nir_op_vec8:
-   case nir_op_vec16:
+   if (nir_op_is_vec(alu->op))
       return emit_vec(ctx, alu, nir_op_infos[alu->op].num_inputs);
+
+   switch (alu->op) {
    case nir_op_mov: {
          assert(alu->def.num_components == 1);
          store_ssa_def(ctx, &alu->def, 0, get_src_ssa(ctx,

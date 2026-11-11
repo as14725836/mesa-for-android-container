@@ -538,8 +538,6 @@ tu_pipeline_layout_init(struct tu_pipeline_layout *layout)
          blake3_update_descriptor_set_layout(&ctx, layout->set[s].layout);
    }
    _mesa_blake3_update(&ctx, &layout->num_sets, sizeof(layout->num_sets));
-   _mesa_blake3_update(&ctx, &layout->push_constant_size,
-                     sizeof(layout->push_constant_size));
    _mesa_blake3_final(&ctx, layout->blake3);
 }
 
@@ -571,16 +569,6 @@ tu_CreatePipelineLayout(VkDevice _device,
       if (set_layout)
          vk_descriptor_set_layout_ref(&set_layout->vk);
    }
-
-   layout->push_constant_size = 0;
-
-   for (unsigned i = 0; i < pCreateInfo->pushConstantRangeCount; ++i) {
-      const VkPushConstantRange *range = pCreateInfo->pPushConstantRanges + i;
-      layout->push_constant_size =
-         MAX2(layout->push_constant_size, range->offset + range->size);
-   }
-
-   layout->push_constant_size = align(layout->push_constant_size, 16);
 
    tu_pipeline_layout_init(layout);
 
@@ -997,17 +985,16 @@ tu_FreeDescriptorSets(VkDevice _device,
 
 template <chip CHIP>
 static void
-write_texel_buffer_descriptor_addr(uint32_t *dst,
-                                   const VkDescriptorAddressInfoEXT *buffer_info)
+write_texel_buffer_descriptor_addr(uint32_t *dst, VkFormat vk_format, uint64_t va, uint64_t range)
 {
-   if (!buffer_info || buffer_info->address == 0) {
+   if (!va) {
       memset(dst, 0, FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
    } else {
       uint8_t swiz[4] = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z,
                           PIPE_SWIZZLE_W };
       fdl6_buffer_view_init<CHIP>(dst,
-                                  vk_format_to_pipe_format(buffer_info->format),
-                                  swiz, buffer_info->address, buffer_info->range);
+                                  vk_format_to_pipe_format(vk_format),
+                                  swiz, va, range);
    }
 }
 
@@ -1065,18 +1052,18 @@ write_emulated_texel_buffer_descriptor_common(uint32_t *dst,
 template <chip CHIP>
 static void
 write_emulated_texel_buffer_descriptor_addr(
-   uint32_t *dst, const VkDescriptorAddressInfoEXT *buffer_info)
+   uint32_t *dst, VkFormat vk_format, uint64_t va, uint64_t range)
 {
-   if (!buffer_info || buffer_info->address == 0) {
+   if (!va) {
       memset(dst, 0, FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
       return;
    }
 
-   enum pipe_format format = vk_format_to_pipe_format(buffer_info->format);
+   enum pipe_format format = vk_format_to_pipe_format(vk_format);
    uint32_t blocksize_B = util_format_get_blocksize(format);
-   uint32_t elements = blocksize_B ? (buffer_info->range / blocksize_B) : 0;
+   uint32_t elements = blocksize_B ? (range / blocksize_B) : 0;
    write_emulated_texel_buffer_descriptor_common<CHIP>(
-      dst, format, buffer_info->address, elements);
+      dst, format, va, elements);
 }
 
 static void
@@ -1125,10 +1112,9 @@ buffer_info_to_address(const VkDescriptorBufferInfo *buffer_info)
 }
 
 template <chip CHIP>
-static void
-write_buffer_descriptor_addr(const struct tu_device *device,
-                             uint32_t *dst,
-                             const VkDescriptorAddressInfoEXT *buffer_info)
+void
+tu_write_buffer_descriptor_addr(const struct tu_device *device,
+                                uint32_t *dst, uint64_t va, uint64_t range)
 {
    const struct fd_dev_info *info = device->physical_device->info;
    /* This prevents any misconfiguration, but 16-bit descriptor capable of both
@@ -1148,15 +1134,12 @@ write_buffer_descriptor_addr(const struct tu_device *device,
       COND(info->props.storage_8bit, 1);
    memset(dst, 0, num_descriptors * FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
 
-   if (!buffer_info || buffer_info->address == 0)
+   if (!va)
       return;
 
    enum fdl_ssbo_emulation_mode ssbo_emulation_mode =
       device->physical_device->compiler_options.enable_ssbo_emulation ?
       FDL_SSBO_EMULATION_ENABLED : FDL_SSBO_EMULATION_DISABLED;
-
-   uint64_t va = buffer_info->address;
-   uint32_t range = buffer_info->range;
 
    if (info->props.storage_16bit) {
       fdl6_buffer_view_init<CHIP>(dst, PIPE_FORMAT_R16_UINT, tu_swiz(X, Y, Z, W), va, range, 1, ssbo_emulation_mode);
@@ -1171,7 +1154,8 @@ write_buffer_descriptor_addr(const struct tu_device *device,
       dst += FDL6_TEX_CONST_DWORDS;
    }
 
-   if (info->props.storage_8bit) {
+   if (info->props.storage_8bit &&
+       !device->physical_device->instance->drirc.misc.enable_64byte_ssbo) {
       fdl6_buffer_view_init<CHIP>(dst, PIPE_FORMAT_R8_UINT, tu_swiz(X, Y, Z, W), va, range, 1, ssbo_emulation_mode);
       dst += FDL6_TEX_CONST_DWORDS;
    }
@@ -1184,23 +1168,16 @@ write_buffer_descriptor(const struct tu_device *device,
                         const VkDescriptorBufferInfo *buffer_info)
 {
    VkDescriptorAddressInfoEXT addr = buffer_info_to_address(buffer_info);
-   write_buffer_descriptor_addr<CHIP>(device, dst, &addr);
+   tu_write_buffer_descriptor_addr<CHIP>(device, dst, addr.address, addr.range);
 }
 
 static void
-write_ubo_descriptor_addr(uint32_t *dst,
-                          const VkDescriptorAddressInfoEXT *buffer_info)
+write_ubo_descriptor_addr(uint32_t *dst, uint64_t va, uint64_t range)
 {
-   if (!buffer_info) {
-      dst[0] = dst[1] = 0;
-      return;
-   }
-
-   uint64_t va = buffer_info->address;
    /* The HW range is in vec4 units */
-   uint32_t range = va ? DIV_ROUND_UP(buffer_info->range, 16) : 0;
+   uint32_t hw_range = va ? DIV_ROUND_UP(range, 16) : 0;
    dst[0] = A6XX_UBO_0_BASE_LO(va);
-   dst[1] = A6XX_UBO_1_BASE_HI(va >> 32) | A6XX_UBO_1_SIZE(range);
+   dst[1] = A6XX_UBO_1_BASE_HI(va >> 32) | A6XX_UBO_1_SIZE(hw_range);
 
    for (unsigned i = 2; i < FDL6_TEX_CONST_DWORDS; i++)
       dst[i] = 0;
@@ -1210,7 +1187,7 @@ static void
 write_ubo_descriptor(uint32_t *dst, const VkDescriptorBufferInfo *buffer_info)
 {
    VkDescriptorAddressInfoEXT addr = buffer_info_to_address(buffer_info);
-   write_ubo_descriptor_addr(dst, &addr);
+   write_ubo_descriptor_addr(dst, addr.address, addr.range);
 }
 
 static void
@@ -1251,6 +1228,17 @@ sampler_has_subsampled_bit(const struct tu_descriptor_update_template_sampler *s
 }
 
 static void
+write_subsampled_metadata(uint32_t *dst, const struct tu_image_view *iview)
+{
+   uint64_t va = iview->image->iova +
+      iview->image->subsampled_metadata_offset +
+      iview->vk.base_array_layer * sizeof(struct tu_subsampled_metadata);
+   uint64_t range =
+      iview->vk.layer_count * sizeof(struct tu_subsampled_metadata);
+   write_ubo_descriptor_addr(dst, va, range);
+}
+
+static void
 write_combined_image_sampler_descriptor(uint32_t *dst,
                                         VkDescriptorType descriptor_type,
                                         const VkDescriptorImageInfo *image_info,
@@ -1269,14 +1257,7 @@ write_combined_image_sampler_descriptor(uint32_t *dst,
 
    if (immutable_sampler_has_subsampled_bit) {
       VK_FROM_HANDLE(tu_image_view, iview, image_info->imageView);
-      VkDescriptorAddressInfoEXT info = {
-         .address = iview->image->iova +
-            iview->image->subsampled_metadata_offset +
-            iview->vk.base_array_layer * sizeof(struct tu_subsampled_metadata),
-         .range =
-            iview->vk.layer_count * sizeof(struct tu_subsampled_metadata),
-      };
-      write_ubo_descriptor_addr(dst + 2 * FDL6_TEX_CONST_DWORDS, &info);
+      write_subsampled_metadata(dst + 2 * FDL6_TEX_CONST_DWORDS, iview);
    }
 }
 
@@ -1329,22 +1310,40 @@ tu_GetDescriptorEXT(
    uint32_t *dest = static_cast<uint32_t *>(pDescriptor);
 
    switch (pDescriptorInfo->type) {
-   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-      write_ubo_descriptor_addr(dest, pDescriptorInfo->data.pUniformBuffer);
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: {
+      uint64_t va = pDescriptorInfo->data.pUniformBuffer ?
+         pDescriptorInfo->data.pUniformBuffer->address : 0;
+      uint64_t range = pDescriptorInfo->data.pUniformBuffer ?
+         pDescriptorInfo->data.pUniformBuffer->range : 0;
+      write_ubo_descriptor_addr(dest, va, range);
       break;
-   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-      write_buffer_descriptor_addr<CHIP>(device, dest, pDescriptorInfo->data.pStorageBuffer);
+   }
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: {
+      uint64_t va = pDescriptorInfo->data.pStorageBuffer ?
+         pDescriptorInfo->data.pStorageBuffer->address : 0;
+      uint64_t range = pDescriptorInfo->data.pStorageBuffer ?
+         pDescriptorInfo->data.pStorageBuffer->range : 0;
+      tu_write_buffer_descriptor_addr<CHIP>(device, dest, va, range);
       break;
+   }
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-   case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: {
+      uint64_t va = pDescriptorInfo->data.pUniformTexelBuffer ?
+         pDescriptorInfo->data.pUniformTexelBuffer->address : 0;
+      uint64_t range = pDescriptorInfo->data.pUniformTexelBuffer ?
+         pDescriptorInfo->data.pUniformTexelBuffer->range : 0;
+      VkFormat format = pDescriptorInfo->data.pUniformTexelBuffer ?
+         pDescriptorInfo->data.pUniformTexelBuffer->format :
+         VK_FORMAT_UNDEFINED;
       if (device->physical_device->compiler_options.enable_texel_buffer_emulation) {
          write_emulated_texel_buffer_descriptor_addr<CHIP>(
-            dest, pDescriptorInfo->data.pUniformTexelBuffer);
+            dest, format, va, range);
       } else {
          write_texel_buffer_descriptor_addr<CHIP>(
-            dest, pDescriptorInfo->data.pUniformTexelBuffer);
+            dest, format, va, range);
       }
       break;
+   }
    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
       write_image_descriptor(dest, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                              pDescriptorInfo->data.pSampledImage);
@@ -1383,6 +1382,126 @@ tu_GetDescriptorEXT(
    }
 }
 TU_GENX(tu_GetDescriptorEXT);
+
+template <chip CHIP>
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_WriteSamplerDescriptorsEXT(
+    VkDevice                                _device,
+    uint32_t                                samplerCount,
+    const VkSamplerCreateInfo*              pSamplers,
+    const VkHostAddressRangeEXT*            pDescriptors)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+
+   for (uint32_t i = 0; i < samplerCount; i++) {
+      uint32_t border_color_index = 0;
+
+      struct vk_sampler_state state;
+      vk_sampler_state_init(&state, &pSamplers[i]);
+
+      if (vk_border_color_is_custom(state.border_color)) {
+         const VkSamplerCustomBorderColorIndexCreateInfoEXT *border_color_info =
+            vk_find_struct_const(pSamplers[i].pNext,
+                                 SAMPLER_CUSTOM_BORDER_COLOR_INDEX_CREATE_INFO_EXT);
+         border_color_index = border_color_info->index;
+      }
+
+      tu_get_sampler_descriptor<CHIP>(device, &state, border_color_index,
+                                      (uint32_t *)pDescriptors[i].address);
+   }
+
+   return VK_SUCCESS;
+}
+TU_GENX(tu_WriteSamplerDescriptorsEXT);
+
+template <chip CHIP>
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_WriteResourceDescriptorsEXT(
+    VkDevice                                _device,
+    uint32_t                                resourceCount,
+    const VkResourceDescriptorInfoEXT*      pResources,
+    const VkHostAddressRangeEXT*            pDescriptors)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+
+   for (uint32_t i = 0; i < resourceCount; i++) {
+      uint32_t *dest = (uint32_t *)pDescriptors[i].address;
+      switch (pResources[i].type) {
+      case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+      case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+      case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: {
+         uint64_t va = pResources[i].data.pAddressRange ?
+            pResources[i].data.pAddressRange->address : 0;
+         uint64_t range = pResources[i].data.pAddressRange ?
+            pResources[i].data.pAddressRange->size : 0;
+
+         if (pResources[i].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            write_ubo_descriptor_addr(dest, va, range);
+         } else if (pResources[i].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+            tu_write_buffer_descriptor_addr<CHIP>(device, dest, va, range);
+         } else {
+            uint32_t max_texel_elements = device->physical_device->info->props.max_texel_buffer_range_elements;
+            if (va == 0) {
+               write_accel_struct<CHIP>(dest, device->null_accel_struct_bo->iova, max_texel_elements);
+            } else {
+               write_accel_struct<CHIP>(dest, va, max_texel_elements);
+            }
+         }
+
+         break;
+      }
+      case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+      case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: {
+         uint64_t va = pResources[i].data.pTexelBuffer ?
+            pResources[i].data.pTexelBuffer->addressRange.address : 0;
+         uint64_t range = pResources[i].data.pTexelBuffer ?
+            pResources[i].data.pTexelBuffer->addressRange.size : 0;
+         VkFormat format = pResources[i].data.pTexelBuffer ?
+            pResources[i].data.pTexelBuffer->format : VK_FORMAT_UNDEFINED;
+         if (device->physical_device->compiler_options.enable_texel_buffer_emulation) {
+            write_emulated_texel_buffer_descriptor_addr<CHIP>(
+               dest, format, va, range);
+         } else {
+            write_texel_buffer_descriptor_addr<CHIP>(
+               dest, format, va, range);
+         }
+         break;
+      }
+      case VK_DESCRIPTOR_TYPE_SAMPLE_WEIGHT_IMAGE_QCOM:
+      case VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM:
+      case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+      case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+      case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: {
+         if (!pResources[i].data.pImage) {
+            memset((void *)dest, 0, FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
+         } else {
+            struct tu_image_view iview = {};
+            tu_image_view_init(device, &iview, pResources[i].data.pImage->pView);
+            if (pResources[i].type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
+               memcpy((void *)dest, iview.view.storage_descriptor,
+                      FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
+            } else {
+               memcpy((void *)dest, iview.view.descriptor,
+                      FDL6_TEX_CONST_DWORDS * sizeof(uint32_t));
+            }
+
+            if (pResources[i].type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
+                (iview.image->vk.create_flags &
+                 VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT)) {
+               write_subsampled_metadata(dest + FDL6_TEX_CONST_DWORDS, &iview);
+            }
+         }
+         break;
+      }
+      default:
+         UNREACHABLE("unimplemented descriptor type");
+         break;
+      }
+   }
+
+   return VK_SUCCESS;
+}
+TU_GENX(tu_WriteResourceDescriptorsEXT);
 
 template <chip CHIP>
 void

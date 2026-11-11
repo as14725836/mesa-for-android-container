@@ -60,6 +60,7 @@ struct tu_const_state
    struct ir3_driver_ubo dynamic_offsets_ubo;
    struct ir3_driver_ubo inline_uniforms_ubo;
    struct ir3_driver_ubo bindless_base_addrs_ubo;
+   struct ir3_driver_ubo embedded_sampler_ubo;
 };
 
 struct tu_shader
@@ -93,6 +94,9 @@ struct tu_shader
     * rewritten to equal the layer.
     */
    bool per_layer_viewport;
+
+   unsigned embedded_sampler_count;
+   struct tu_embedded_sampler **embedded_samplers;
 
    union {
       struct {
@@ -146,7 +150,8 @@ struct tu_shader_key {
    bool lower_view_index_to_device_index : 1;
    bool custom_resolve : 1;
    bool emulate_alpha_to_coverage : 1;
-   uint32_t padding : 23;
+   bool descriptor_heap : 1;
+   uint32_t padding : 22;
 
    enum ir3_wavesize_option api_wavesize, real_wavesize;
 
@@ -189,6 +194,7 @@ tu_spirv_to_nir(struct tu_device *dev,
                 VkPipelineCreateFlags2KHR pipeline_flags,
                 const VkPipelineShaderStageCreateInfo *stage_info,
                 const struct tu_shader_key *key,
+                struct vk_sampler_state_array *embedded_samplers_out,
                 mesa_shader_stage stage);
 
 template <chip CHIP>
@@ -203,8 +209,10 @@ tu6_emit_xs(struct tu_crb &crb,
 void
 tu6_emit_xs_constants(struct tu_cs *cs,
                       mesa_shader_stage stage,
+                      const struct ir3_driver_ubo *embedded_sampler_ubo,
                       const struct ir3_shader_variant *xs,
-                      uint64_t binary_iova);
+                      uint64_t binary_iova,
+                      uint64_t embedded_sampler_iova);
 
 template <chip CHIP>
 void
@@ -238,6 +246,7 @@ VkResult
 tu_shader_create(struct tu_device *dev,
                  struct tu_shader **shader_out,
                  nir_shader *nir,
+                 const vk_sampler_state_array *embedded_samplers,
                  const struct tu_shader_key *key,
                  const struct tu_shader_info *shader_info,
                  const struct ir3_shader_key *ir3_key,

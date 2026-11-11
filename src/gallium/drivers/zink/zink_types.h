@@ -1363,6 +1363,7 @@ struct zink_resource_object {
    unsigned plane_offsets[3];
    unsigned plane_strides[3];
    unsigned plane_count;
+   struct zink_bo *plane_bo[3];
 
    bool host_visible;
    bool coherent;
@@ -1424,6 +1425,16 @@ struct zink_resource {
          VkImageAspectFlags aspect;
       };
    };
+   /* Plane-1 offset/stride/fd for a multi-plane YUV import, stashed on the
+    * plane-1 placeholder and read back on the plane-0 call.  Must live outside
+    * the buffer/image union: import_uv_fd is written/read for every resource
+    * (incl. PIPE_BUFFER), so aliasing it onto buffer state would close a
+    * bogus fd.
+    */
+   uint64_t import_uv_offset;
+   uint32_t import_uv_stride;
+   /* -1 when there is no imported UV-plane fd (0 is a valid fd). */
+   int import_uv_fd;
    uint32_t sampler_binds[MESA_SHADER_MESH_STAGES];
    uint32_t image_binds[MESA_SHADER_MESH_STAGES];
    uint16_t sampler_bind_count[2]; //gfx, compute
@@ -2186,6 +2197,13 @@ struct zink_context {
    } hud;
 
    struct pipe_resource *dummy_xfb_buffer;
+
+   /* Fallback sampler satisfying Vulkan's requirement that a combined image
+    * sampler descriptor always carry a valid VkSampler. mesa/st's multi-plane
+    * YUV lowering binds extra plane sampler-view slots that the application
+    * never sets a sampler state for, leaving them otherwise null.
+    */
+   VkSampler null_sampler;
 
    unsigned buffer_rebind_counter;
    unsigned image_rebind_counter;

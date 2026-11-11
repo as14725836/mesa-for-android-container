@@ -899,6 +899,163 @@ tu6_emit_mrt(struct tu_cmd_buffer *cmd,
 
       const struct tu_image_view *iview = cmd->state.attachments[a];
 
+      /* NV12 (2-plane 420) render target: a 2-plane YUV COLOR view has no
+       * single HW color format (fdl6_view_init early-returns), so emit the Y
+       * plane as MRT `remapped` and the UV plane as MRT `remapped + 1` and let
+       * the HW auto-split the color write, as freedreno/GL's emit_mrt() does. */
+      bool is_nv12_rt =
+         tu6_format_is_yuv_render_target(iview->image->vk.format) &&
+         iview->vk.aspects == iview->image->vk.aspects;
+
+      if (is_nv12_rt) {
+         const struct fdl_layout *y_layout = &iview->image->layout[0];
+         const struct fdl_layout *uv_layout = &iview->image->layout[1];
+         unsigned level = iview->vk.base_mip_level;
+         unsigned layer = iview->vk.base_array_layer;
+
+         uint64_t y_base_iova = tu_image_plane_iova(iview->image, 0);
+         uint64_t uv_base_iova = tu_image_plane_iova(iview->image, 1);
+
+         uint64_t y_addr = y_base_iova +
+            fdl_surface_offset(y_layout, level, layer);
+         uint64_t uv_addr = uv_base_iova +
+            fdl_surface_offset(uv_layout, level, layer);
+
+         uint32_t y_pitch = fdl_pitch(y_layout, level);
+         uint32_t uv_pitch = fdl_pitch(uv_layout, level);
+         uint32_t y_array_pitch = fdl_layer_stride(y_layout, level);
+         uint32_t uv_array_pitch = fdl_layer_stride(uv_layout, level);
+
+         /* UBWC NV12 (NV12_Q08C): both planes use the multiplanar HW format +
+          * TILE6_3 + real flag buffers; linear uses FMT6_NV12_4R + TILE6_LINEAR
+          * (HW auto-split). Mirrors freedreno GL's fd6_gmem.cc emit_mrt. */
+         bool y_ubwc = y_layout->ubwc;
+         bool uv_ubwc = uv_layout->ubwc;
+         enum a6xx_format nv12_format = y_ubwc ? FMT6_R8_G8B8_2PLANE_420_UNORM
+                                               : FMT6_NV12_4R;
+         enum a6xx_tile_mode nv12_tile_mode = y_ubwc ? TILE6_3 : TILE6_LINEAR;
+
+         uint64_t y_ubwc_addr = 0, uv_ubwc_addr = 0;
+         uint32_t y_ubwc_pitch = 0, uv_ubwc_pitch = 0;
+         uint32_t y_flag_array_pitch = 0, uv_flag_array_pitch = 0;
+         if (y_ubwc) {
+            y_ubwc_addr = y_base_iova +
+               fdl_ubwc_offset(y_layout, level, layer);
+            y_ubwc_pitch = fdl_ubwc_pitch(y_layout, level);
+         }
+         if (uv_ubwc) {
+            uv_ubwc_addr = uv_base_iova +
+               fdl_ubwc_offset(uv_layout, level, layer);
+            uv_ubwc_pitch = fdl_ubwc_pitch(uv_layout, level);
+            if (iview->image->disjoint) {
+               /* Separate-BO UBWC: Y and UV BASEs are unrelated addresses, so
+                * the Y->UV delta won't fit ARRAY_PITCH's 23-bit field. Use
+                * each plane's own layer stride; the HW reads MRT[i+1].BASE for
+                * the sibling plane (same scheme as linear separate-BO NV12). */
+               y_array_pitch = fdl_layer_stride(y_layout, level);
+               uv_array_pitch = fdl_layer_stride(uv_layout, level);
+               y_flag_array_pitch = y_layout->ubwc_layer_size;
+               uv_flag_array_pitch = uv_layout->ubwc_layer_size;
+            } else {
+               /* Single-BO UBWC: encode the UV plane location in ARRAY_PITCH so
+                * the HW walks Y then UV as two "layers" (mirrors GL fd6_gmem). */
+               y_array_pitch = uv_addr - y_addr;
+               uv_array_pitch = y_array_pitch;
+               y_flag_array_pitch = uv_ubwc_addr - y_ubwc_addr;
+               /* UV flag array pitch is the flag-buffer size only, not mixed
+                * with pixel data (matches fd6_gmem.cc's uv_flag_array_stride).
+                * Only consumed for array_layers > 1. */
+               uv_flag_array_pitch = uv_layout->ubwc_layer_size;
+            }
+         }
+
+         crb.add(RB_MRT_BUF_INFO(CHIP, remapped,
+            .color_format = nv12_format,
+            .color_tile_mode = nv12_tile_mode,
+            .color_swap = WZYX,
+            .losslesscompen = y_ubwc,
+         ));
+         crb.add(A6XX_RB_MRT_PITCH(remapped, y_pitch));
+         crb.add(A6XX_RB_MRT_ARRAY_PITCH(remapped, y_array_pitch));
+         crb.add(A6XX_RB_MRT_BASE(remapped, .qword = y_addr));
+         crb.add(A6XX_RB_MRT_BASE_GMEM(
+            remapped, tu_attachment_gmem_offset(
+                         cmd, &cmd->state.pass->attachments[a], 0)));
+         crb.add(A6XX_SP_PS_MRT_REG(remapped,
+            .color_format = nv12_format,
+         ));
+         crb.add(A6XX_RB_COLOR_FLAG_BUFFER_ADDR(remapped, .qword = y_ubwc_addr));
+         crb.add(A6XX_RB_COLOR_FLAG_BUFFER_PITCH(remapped,
+            .pitch = y_ubwc_pitch,
+            .array_pitch = y_flag_array_pitch >> 2,
+         ));
+
+         unsigned uv_remapped = remapped + 1;
+         assert(uv_remapped < MAX_RTS);
+         /* The UV plane steals MRT slot remapped+1. GL_EXT_YUV_target renders
+          * to a single color attachment, so nothing else claims this slot; a
+          * second attachment remapped here would overwrite the UV plane. */
+         assert(!(written & (1u << uv_remapped)));
+
+         crb.add(RB_MRT_BUF_INFO(CHIP, uv_remapped,
+            .color_format = nv12_format,
+            .color_tile_mode = nv12_tile_mode,
+            .color_swap = WZYX,
+            .losslesscompen = uv_ubwc,
+         ));
+         crb.add(A6XX_RB_MRT_PITCH(uv_remapped, uv_pitch));
+         crb.add(A6XX_RB_MRT_ARRAY_PITCH(uv_remapped, uv_array_pitch));
+         crb.add(A6XX_RB_MRT_BASE(uv_remapped, .qword = uv_addr));
+         crb.add(A6XX_RB_MRT_BASE_GMEM(
+            uv_remapped, tu_attachment_gmem_offset_uv(
+                            cmd, &cmd->state.pass->attachments[a], 0)));
+         crb.add(A6XX_SP_PS_MRT_REG(uv_remapped,
+            .color_format = (enum a6xx_format) 0,
+         ));
+         crb.add(A6XX_RB_COLOR_FLAG_BUFFER_ADDR(uv_remapped, .qword = uv_ubwc_addr));
+         crb.add(A6XX_RB_COLOR_FLAG_BUFFER_PITCH(uv_remapped,
+            .pitch = uv_ubwc_pitch,
+            .array_pitch = uv_flag_array_pitch >> 2,
+         ));
+
+         /* Enable component writes on the driver-inserted UV MRT; pipeline
+          * blend state only masks shader-declared MRTs, so without this the
+          * chroma plane is masked off (=> green output).
+          */
+         crb.add(A6XX_RB_MRT_CONTROL(uv_remapped, .component_enable = 0xf));
+         crb.add(A6XX_RB_MRT_BLEND_CONTROL(uv_remapped,));
+         if (CHIP >= A8XX) {
+            crb.add(SP_MRT_BLEND_CNTL_REG(CHIP, uv_remapped,
+                                          .component_write_mask = 0xf));
+         }
+
+         /* Point the UV MRT's SP_PS_OUTPUT_REG at the FS's single
+          * (FRAG_RESULT_DATA0) output regid so the HW writes the same fragment
+          * data to both MRTs. Use uv_remapped (not a hardcoded 1): the UV plane
+          * lives at remapped+1, which is only 1 when the YUV RT is first. */
+         const struct tu_shader *fs_shader =
+            cmd->state.shaders[MESA_SHADER_FRAGMENT];
+         if (fs_shader && fs_shader->variant) {
+            int out_idx = ir3_find_output(fs_shader->variant,
+               (gl_varying_slot)FRAG_RESULT_DATA0);
+            if (out_idx >= 0) {
+               uint32_t out_regid = ir3_get_output_regid(
+                  &fs_shader->variant->outputs[out_idx]);
+               if (VALIDREG(out_regid)) {
+                  crb.add(A6XX_SP_PS_OUTPUT_REG(uv_remapped,
+                     .regid = out_regid & ~HALF_REG_ID,
+                     .half_precision = !!(out_regid & HALF_REG_ID)));
+               }
+            }
+         }
+
+         if (remapped == 0)
+            mrt0_format = nv12_format;
+
+         written |= (1u << remapped) | (1u << uv_remapped);
+         continue;
+      }
+
       crb.add(RB_MRT_BUF_INFO(CHIP, remapped,
                               .dword = iview->view.RB_MRT_BUF_INFO));
       crb.add(A6XX_RB_MRT_PITCH(remapped, iview->view.pitch));
@@ -1072,6 +1229,20 @@ tu6_emit_render_cntl<A6XX>(struct tu_cmd_buffer *cmd,
          const struct tu_image_view *iview = cmd->state.attachments[a];
          if (iview->view.ubwc_enabled)
             mrts_ubwc_enable |= 1 << remapped;
+
+         /* NV12 render target: tu6_emit_mrt emits MRTs `remapped` (Y) and
+          * `remapped+1` (UV). fdl6_view_init early-returns for multiplane
+          * views without filling iview->view.ubwc_enabled, so consult the
+          * per-plane layout directly instead.  When either plane is UBWC,
+          * flag its FLAG_MRTS bit so the UBWC resolve path is taken.
+          */
+         if (tu6_format_is_yuv_render_target(iview->image->vk.format) &&
+             iview->vk.aspects == iview->image->vk.aspects) {
+            if (iview->image->layout[0].ubwc)
+               mrts_ubwc_enable |= 1u << remapped;
+            if (iview->image->layout[1].ubwc)
+               mrts_ubwc_enable |= 1u << (remapped + 1);
+         }
       }
 
       cntl |= A6XX_RB_RENDER_CNTL_FLAG_MRTS(mrts_ubwc_enable);
@@ -3940,6 +4111,7 @@ tu_allocate_transient_attachments(struct tu_cmd_buffer *cmd, bool sysmem)
       const struct tu_image_view *iview = cmd->state.attachments[i];
       if (iview && !(iview->image->vk.create_flags &
                      VK_IMAGE_CREATE_SPARSE_BINDING_BIT) &&
+          iview->image->mem &&
           !iview->image->mem->bo &&
           (sysmem || rp->attachments[i].load ||
            rp->attachments[i].load_stencil ||
@@ -4611,6 +4783,25 @@ tu_BeginCommandBuffer(VkCommandBuffer commandBuffer,
             cmd_buffer->state.predication_active = cond_rend->conditionalRenderingEnable;
             break;
          }
+         case VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_DESCRIPTOR_HEAP_INFO_EXT: {
+            const VkCommandBufferInheritanceDescriptorHeapInfoEXT *heap_info =
+               (VkCommandBufferInheritanceDescriptorHeapInfoEXT *) ext;
+
+            /* Binding heaps doesn't immediately emit anything, only dirties
+             * descriptor state to be emitted when there is a draw, so we need
+             * to re-emit it here in the secondary in case there hasn't been a
+             * draw and it needs to be emitted.
+             */
+            if (heap_info->pResourceHeapBindInfo) {
+               TU_CALLX(cmd_buffer->device, tu_CmdBindResourceHeapEXT)(
+                  commandBuffer, heap_info->pResourceHeapBindInfo);
+            }
+            if (heap_info->pSamplerHeapBindInfo) {
+               tu_CmdBindSamplerHeapEXT(commandBuffer,
+                                        heap_info->pSamplerHeapBindInfo);
+            }
+            break;
+         }
          default:
             break;
          }
@@ -5197,6 +5388,72 @@ tu_CmdBindDescriptorBufferEmbeddedSamplers2EXT(
    }
 }
 
+VKAPI_ATTR void VKAPI_CALL
+tu_CmdBindSamplerHeapEXT(
+    VkCommandBuffer                 commandBuffer,
+    const VkBindHeapInfoEXT*        pBindInfo)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+
+   /* The HW has different bindless bases for compute and gfx, but the
+    * descriptor heap is shared.
+    */
+
+   for (unsigned i = 0; i < ARRAY_SIZE(cmd->descriptors); i++) {
+      struct tu_descriptor_state *desc_sets = &cmd->descriptors[i];
+
+      desc_sets->set_iova[TU_SAMPLER_HEAP_INDEX] =
+         pBindInfo->heapRange.address | BINDLESS_DESCRIPTOR_16B;
+      desc_sets->max_sets_bound =
+         MAX2(desc_sets->max_sets_bound, TU_SAMPLER_HEAP_INDEX + 1);
+
+      tu_dirty_desc_sets(cmd, (VkPipelineBindPoint)i);
+   }
+}
+
+template <chip CHIP>
+VKAPI_ATTR void VKAPI_CALL
+tu_CmdBindResourceHeapEXT(
+    VkCommandBuffer                 commandBuffer,
+    const VkBindHeapInfoEXT*        pBindInfo)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+
+   /* Allocate and fill the descriptor for loading heap data. */
+   struct tu_cs_memory memory;
+   VkResult result =
+      tu_cs_alloc(&cmd->sub_cs, 2, FDL6_TEX_CONST_DWORDS, &memory);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return;
+   }
+
+   tu_write_buffer_descriptor_addr<CHIP>(cmd->device,
+                                         memory.map,
+                                         pBindInfo->heapRange.address,
+                                         pBindInfo->heapRange.size);
+
+   for (unsigned i = 0; i < ARRAY_SIZE(cmd->descriptors); i++) {
+      struct tu_descriptor_state *desc_sets = &cmd->descriptors[i];
+
+      desc_sets->set_iova[TU_RESOURCE_HEAP_INDEX] =
+         pBindInfo->heapRange.address | BINDLESS_DESCRIPTOR_64B;
+      desc_sets->set_iova[TU_RESOURCE_HEAP_DATA_INDEX] =
+         memory.iova | BINDLESS_DESCRIPTOR_64B;
+      /* Embedded samplers can be used without a sampler heap, since we don't
+       * require any reserved space, but they require a resource heap since
+       * samplers can't be accessed alone. Set them here.
+       */
+      desc_sets->set_iova[TU_EMBEDDED_SAMPLER_HEAP_INDEX] =
+         cmd->device->embedded_sampler_bo->iova | BINDLESS_DESCRIPTOR_16B;
+      desc_sets->max_sets_bound =
+         MAX2(desc_sets->max_sets_bound, TU_EMBEDDED_SAMPLER_HEAP_INDEX + 1);
+
+      tu_dirty_desc_sets(cmd, (VkPipelineBindPoint)i);
+   }
+}
+TU_GENX(tu_CmdBindResourceHeapEXT);
+
 static VkResult
 tu_push_descriptor_set_update_layout(struct tu_device *device,
                                      struct tu_descriptor_set *set,
@@ -5486,6 +5743,16 @@ tu_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    memcpy(reinterpret_cast<char *>(cmd->push_constants) + pPushConstantsInfo->offset,
           pPushConstantsInfo->pValues, pPushConstantsInfo->size);
+   cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+tu_CmdPushDataEXT(VkCommandBuffer commandBuffer,
+                  const VkPushDataInfoEXT *pPushDataInfo)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+   memcpy((char *) cmd->push_constants + pPushDataInfo->offset,
+          pPushDataInfo->data.address, pPushDataInfo->data.size);
    cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
 }
 
@@ -6101,7 +6368,9 @@ vk2tu_access(VkAccessFlags2 flags, VkAccessFlags3KHR flags2,
    }
 
    if (gfx_read_access(flags, stages,
-                       VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT,
+                       VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT |
+                       VK_ACCESS_2_SAMPLER_HEAP_READ_BIT_EXT |
+                       VK_ACCESS_2_RESOURCE_HEAP_READ_BIT_EXT,
                        SHADER_STAGES)) {
       if (sparse_aliasing)
          mask |= TU_ACCESS_UCHE_INCOHERENT_READ;
@@ -7004,6 +7273,9 @@ tu7_emit_subpass_clear(struct tu_cmd_buffer *cmd, struct tu_resolve_group *resol
    for (uint32_t i = 0; i < cmd->state.pass->attachment_count; ++i) {
       struct tu_render_pass_attachment *att =
          &cmd->state.pass->attachments[i];
+      /* NV12 render targets have no GMEM clear path; apps must fully overwrite. */
+      if (tu6_format_is_yuv_render_target(att->format))
+         continue;
       if (att->clear_mask && att->first_subpass_idx == subpass_idx) {
          if (!emitted_scissor && emit_blit_scissor) {
             tu6_emit_blit_scissor(cmd, cs, 0, false);
@@ -8011,10 +8283,12 @@ tu7_emit_shared_preamble_consts(
    const struct tu_push_constant_range *shared_consts,
    uint32_t *push_constants)
 {
-   tu_cs_emit_pkt4(cs, SP_SHARED_CONSTANT_GFX_REG(CHIP, shared_consts->lo_dwords).reg,
-                   shared_consts->dwords);
-   tu_cs_emit_array(cs, push_constants + shared_consts->lo_dwords,
-                    shared_consts->dwords);
+   if (shared_consts->dwords > 0) {
+      tu_cs_emit_pkt4(cs, SP_SHARED_CONSTANT_GFX_REG(CHIP, shared_consts->lo_dwords).reg,
+                      shared_consts->dwords);
+      tu_cs_emit_array(cs, push_constants + shared_consts->lo_dwords,
+                       shared_consts->dwords);
+   }
 }
 
 static uint32_t

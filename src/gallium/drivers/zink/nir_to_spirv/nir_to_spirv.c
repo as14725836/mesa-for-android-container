@@ -160,20 +160,7 @@ emit_triop(struct ntv_context *ctx, SpvOp op, SpvId type,
 static bool
 alu_op_is_typeless(nir_op op)
 {
-   switch (op) {
-   case nir_op_mov:
-   case nir_op_vec16:
-   case nir_op_vec2:
-   case nir_op_vec3:
-   case nir_op_vec4:
-   case nir_op_vec5:
-   case nir_op_vec8:
-   case nir_op_bcsel:
-      return true;
-   default:
-      break;
-   }
-   return false;
+   return nir_op_is_vec_or_mov(op) || op == nir_op_bcsel;
 }
 
 static nir_alu_type
@@ -1140,6 +1127,7 @@ type_to_dim(enum glsl_sampler_dim gdim, bool *is_ms)
    case GLSL_SAMPLER_DIM_BUF:
       return SpvDimBuffer;
    case GLSL_SAMPLER_DIM_EXTERNAL:
+   case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
       return SpvDim2D; /* seems dodgy... */
    case GLSL_SAMPLER_DIM_MS:
       *is_ms = true;
@@ -4123,6 +4111,7 @@ tex_instr_is_lod_allowed(nir_tex_instr *tex)
            /* External images are interpreted as 2D in type_to_dim,
             * so LOD is allowed */
            tex->sampler_dim == GLSL_SAMPLER_DIM_EXTERNAL ||
+           tex->sampler_dim == GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y ||
            /* RECT will always become 2D, so this is fine */
            tex->sampler_dim == GLSL_SAMPLER_DIM_RECT);
 }

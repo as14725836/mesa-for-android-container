@@ -846,6 +846,20 @@ tu_attachment_gmem_offset_stencil(struct tu_cmd_buffer *cmd,
       att->samples;
 }
 
+/* GMEM offset of an NV12 render target's UV (chroma) plane, which lives in its
+ * own GMEM region (gmem_offset_uv[]).  Uses the Y plane's per-layer stride.
+ */
+static inline uint32_t
+tu_attachment_gmem_offset_uv(struct tu_cmd_buffer *cmd,
+                             const struct tu_render_pass_attachment *att,
+                             uint32_t layer)
+{
+   assert(cmd->state.gmem_layout < TU_GMEM_LAYOUT_COUNT);
+   return att->gmem_offset_uv[cmd->state.gmem_layout] +
+      layer * cmd->state.tiling->tile0.width * cmd->state.tiling->tile0.height *
+      att->cpp;
+}
+
 VkResult tu_cmd_buffer_begin(struct tu_cmd_buffer *cmd_buffer,
                              const VkCommandBufferBeginInfo *pBeginInfo);
 

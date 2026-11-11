@@ -3568,8 +3568,8 @@ for op in ['fmin', 'fmax']:
 optimizations += [(('ldexp', '#a(is_nan)', b), NAN, 'true', TestStatus.XFAIL)] # XFAIL is ldexp(NaN, 0.0) producing NaN instead of 0.0.
 
 # NaN propagation: Dot opcodes. If any component is NaN, replace it with NaN.
-for op in ['fdot2', 'fdot3', 'fdot4', 'fdot5', 'fdot8', 'fdot16']:
-    optimizations += [((op, '#a(is_any_comp_nan)', b), NAN)] # commutative
+for sz in range(2, 17):
+    optimizations += [((f'fdot{sz}', '#a(is_any_comp_nan)', b), NAN)] # commutative
 
 # NaN propagation: FP comparison opcodes except !=. Replace it with false.
 for op in ['feq', 'fge', 'flt']:

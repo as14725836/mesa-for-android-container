@@ -212,7 +212,8 @@ tu_BindBufferMemory2(VkDevice device,
          buffer->vk.device_address = mem->bo->iova + pBindInfos[i].memoryOffset;
          if (buffer->vk.usage &
              (VK_BUFFER_USAGE_2_SAMPLER_DESCRIPTOR_BUFFER_BIT_EXT |
-              VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT))
+              VK_BUFFER_USAGE_2_RESOURCE_DESCRIPTOR_BUFFER_BIT_EXT |
+              VK_BUFFER_USAGE_2_DESCRIPTOR_HEAP_BIT_EXT))
             tu_bo_allow_dump(dev, mem->bo);
 #ifdef HAVE_PERFETTO
          tu_perfetto_log_bind_buffer(dev, buffer);

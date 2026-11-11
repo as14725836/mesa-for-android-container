@@ -110,19 +110,6 @@ nir_gather_types(nir_function_impl *impl,
                nir_alu_instr *alu = nir_instr_as_alu(instr);
                const nir_op_info *info = &nir_op_infos[alu->op];
                switch (alu->op) {
-               case nir_op_mov:
-               case nir_op_vec2:
-               case nir_op_vec3:
-               case nir_op_vec4:
-               case nir_op_vec5:
-               case nir_op_vec8:
-               case nir_op_vec16:
-                  for (unsigned i = 0; i < info->num_inputs; i++) {
-                     copy_types(alu->src[i].src, &alu->def,
-                                float_types, int_types, &progress);
-                  }
-                  break;
-
                case nir_op_bcsel:
                case nir_op_b32csel:
                   set_type(alu->src[0].src.ssa->index, nir_type_bool,
@@ -134,6 +121,14 @@ nir_gather_types(nir_function_impl *impl,
                   break;
 
                default:
+                  if (nir_op_is_vec_or_mov(alu->op)) {
+                     for (unsigned i = 0; i < info->num_inputs; i++) {
+                        copy_types(alu->src[i].src, &alu->def,
+                                   float_types, int_types, &progress);
+                     }
+                     break;
+                  }
+
                   for (unsigned i = 0; i < info->num_inputs; i++) {
                      set_type(alu->src[i].src.ssa->index,
                               info->input_types[i],

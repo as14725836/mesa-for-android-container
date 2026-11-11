@@ -48,13 +48,6 @@ lower_alu_instr(nir_alu_instr *alu)
    const nir_op_info *op_info = &nir_op_infos[alu->op];
 
    switch (alu->op) {
-   case nir_op_mov:
-   case nir_op_vec2:
-   case nir_op_vec3:
-   case nir_op_vec4:
-   case nir_op_vec5:
-   case nir_op_vec8:
-   case nir_op_vec16:
    case nir_op_inot:
    case nir_op_iand:
    case nir_op_ior:
@@ -150,6 +143,13 @@ lower_alu_instr(nir_alu_instr *alu)
       break;
 
    default:
+      if (nir_op_is_vec_or_mov(alu->op)) {
+         if (alu->def.bit_size != 1)
+            return false;
+         /* These we expect to have booleans but the opcode doesn't change */
+         break;
+      }
+
       assert(alu->def.bit_size > 1);
       for (unsigned i = 0; i < op_info->num_inputs; i++)
          assert(alu->src[i].src.ssa->bit_size > 1);

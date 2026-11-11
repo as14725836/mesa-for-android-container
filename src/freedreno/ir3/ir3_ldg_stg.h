@@ -81,9 +81,11 @@ ldg_stg_offset(struct ir3_context *ctx, nir_intrinsic_instr *intr)
    assert(intr->intrinsic == nir_intrinsic_load_global_offset ||
           intr->intrinsic == nir_intrinsic_store_global_offset ||
           intr->intrinsic == nir_intrinsic_load_global ||
+          intr->intrinsic == nir_intrinsic_load_global_constant ||
           intr->intrinsic == nir_intrinsic_store_global);
 
    if (intr->intrinsic == nir_intrinsic_load_global ||
+       intr->intrinsic == nir_intrinsic_load_global_constant ||
        intr->intrinsic == nir_intrinsic_store_global) {
       return (struct ldg_stg_offset){
          .imm = create_immed(&ctx->build, 0),

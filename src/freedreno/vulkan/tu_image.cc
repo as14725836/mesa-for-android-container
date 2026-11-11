@@ -124,13 +124,6 @@ tu_format_for_aspect(enum pipe_format format, VkImageAspectFlags aspect_mask)
 }
 
 static bool
-tu_is_r8g8(enum pipe_format format)
-{
-   return (util_format_get_blocksize(format) == 2) &&
-          (util_format_get_nr_components(format) == 2);
-}
-
-static bool
 tu_is_r8g8_compatible(enum pipe_format format)
 {
    return (util_format_get_blocksize(format) == 2) &&
@@ -223,7 +216,22 @@ tu_image_view_init(struct tu_device *device,
                                         iview->swizzle);
 
    struct fdl_view_args args = {};
-   args.iova = image->iova;
+   if (image->disjoint) {
+      uint32_t plane_idx = tu6_plane_index(image->vk.format, aspect_mask);
+      if (aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT) {
+         for (int i = 0; i < TU_MAX_PLANE_COUNT; i++)
+            args.plane_iova[i] = image->plane_mem[i].iova;
+         args.is_disjoint = true;
+         /* The multi-plane sampling path in fd6_view uses plane_iova[], but the
+          * single-plane/base code path (and base_addr computation) reads
+          * args.iova — point it at plane 0 so it is never a null base. */
+         args.iova = image->plane_mem[0].iova;
+      } else {
+         args.iova = image->plane_mem[plane_idx].iova;
+      }
+   } else {
+      args.iova = image->iova;
+   }
    args.base_array_layer = range->baseArrayLayer;
    args.base_miplevel = range->baseMipLevel;
    args.layer_count = vk_image_subresource_layer_count(&image->vk, range);
@@ -454,7 +462,7 @@ format_list_reinterprets_r8g8_r16(enum pipe_format format, const VkImageFormatLi
    for (uint32_t i = 0; i < fmt_list->viewFormatCount; i++) {
       enum pipe_format format =
          vk_format_to_pipe_format(fmt_list->pViewFormats[i]);
-      if (tu_is_r8g8(format))
+      if (fdl_format_is_r8g8(format))
          has_r8g8 = true;
       else
          has_non_r8g8 = true;
@@ -613,9 +621,12 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
 
          /* NV12 uses a special compression scheme for the Y channel which
           * doesn't support reinterpretation. We have to fall back to linear
-          * always.
+          * always -- UNLESS the image was explicitly imported with
+          * DRM_FORMAT_MOD_QCOM_COMPRESSED, in which case the producer already
+          * committed to UBWC and we must honor that (NV12_Q08C dma-buf import).
           */
-         if (pCreateInfo->format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM) {
+         if (pCreateInfo->format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM &&
+             modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED) {
             if (ubwc_enabled) {
                perf_debug(
                   device,
@@ -663,6 +674,16 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
                ubwc_enabled = false;
          }
 
+         /* An ALIAS image must have a byte-identical layout to any compatible
+          * image on the same memory. A multi-plane YCbCr image is forced linear
+          * under MUTABLE and may be aliased by such an image, so force linear
+          * here too to guarantee the layouts agree. */
+         if ((pCreateInfo->flags & VK_IMAGE_CREATE_ALIAS_BIT) &&
+             !force_linear_tile) {
+            ubwc_enabled = false;
+            force_linear_tile = true;
+         }
+
          /* If the threshold of the linear mipmap fallback for compressed
           * format is reached at a different mipmap level than the
           * size-compatible non-compressed formats the image can be viewed as,
@@ -705,6 +726,16 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
    image->vk.drm_format_mod = modifier;
 #endif
 
+   /* Disjoint multi-plane: LINEAR binds each plane in its own BO directly.
+    * Non-UBWC disjoint has no layout adjustment; force it linear here (UBWC
+    * disjoint is handled by the per-plane MRT/sampling paths). */
+   if ((pCreateInfo->flags & VK_IMAGE_CREATE_DISJOINT_BIT) &&
+       tu6_plane_count(image->vk.format) > 1 &&
+       modifier != DRM_FORMAT_MOD_QCOM_COMPRESSED) {
+      ubwc_enabled = false;
+      force_linear_tile = true;
+   }
+
    if (modifier == DRM_FORMAT_MOD_LINEAR) {
       force_linear_tile = true;
    }
@@ -715,7 +746,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
    }
 
    /* Whether a view of the image with an R8G8 format could be made. */
-   bool has_r8g8 = tu_is_r8g8(vk_format_to_pipe_format(image->vk.format));
+   bool has_r8g8 = fdl_format_is_r8g8(vk_format_to_pipe_format(image->vk.format));
 
    /* With AHB, we could be asked to create an image with VK_IMAGE_TILING_LINEAR
     * but gralloc doesn't know this.  So if we are explicitly told that it is
@@ -813,7 +844,8 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
       /* fdl6_layout can't take explicit offset without explicit pitch
        * add offset manually for extra layouts for planes
        */
-      if (!plane_layouts && i > 0) {
+      if (!plane_layouts && i > 0 &&
+          !(image->vk.create_flags & VK_IMAGE_CREATE_DISJOINT_BIT)) {
          uint32_t offset = ALIGN_POT(image->total_size, 4096);
          for (int i = 0; i < image->vk.mip_levels; i++) {
             layout->slices[i].offset += offset;
@@ -1047,6 +1079,14 @@ tu_CreateImage(VkDevice _device,
                 sizeof(client_address));
       }
 
+      const VkOpaqueCaptureDataCreateInfoEXT *replay_info_2 =
+         vk_find_struct_const(pCreateInfo->pNext,
+                              OPAQUE_CAPTURE_DATA_CREATE_INFO_EXT);
+      if (replay_info_2 && replay_info_2->pData) {
+         flags |= TU_SPARSE_VMA_REPLAYABLE;
+         memcpy(&client_address, replay_info_2->pData->address, sizeof(client_address));
+      }
+
       result = tu_sparse_vma_init(device, &image->vk.base, &image->vma,
                                   &image->iova, flags, image->total_size, 0,
                                   client_address);
@@ -1128,13 +1168,39 @@ tu_image_bind(struct tu_device *device,
                                          swapchain_info->imageIndex);
 #endif
       mem = tu_device_memory_from_handle(mem_handle);
-      /* memoryOffset is ignored when VkBindImageMemorySwapchainInfoKHR is
-       * present, so we follow common wsi to set the offset to 0 here.
-       */
       offset = 0;
    }
 
    assert(mem);
+
+   const VkBindImagePlaneMemoryInfo *plane_info =
+      vk_find_struct_const(bind_info->pNext, BIND_IMAGE_PLANE_MEMORY_INFO);
+   if (plane_info) {
+      uint32_t plane = tu6_plane_index(image->vk.format, plane_info->planeAspect);
+      image->plane_mem[plane].mem = mem;
+      image->plane_mem[plane].mem_offset = offset;
+      image->plane_mem[plane].iova = mem->iova + offset;
+      image->disjoint = true;
+      /* Keep the common bindings pointed at plane 0 so readers that assume a
+       * single binding (image->mem/iova, host-copy image->map) don't see NULL.
+       * Per-plane host image copy of a disjoint image is not supported. */
+      if (plane == 0) {
+         image->mem = mem;
+         image->mem_offset = offset;
+         image->iova = mem->iova + offset;
+         if ((image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) &&
+             mem->bo) {
+            if (!mem->bo->map) {
+               result = tu_bo_map(device, mem->bo, NULL);
+               if (result != VK_SUCCESS)
+                  return result;
+            }
+            image->map = (char *) mem->bo->map + offset;
+         }
+      }
+      return VK_SUCCESS;
+   }
+
    image->mem = mem;
    image->mem_offset = offset;
    image->iova = mem->iova + offset;
@@ -1389,6 +1455,20 @@ tu_GetImageMemoryRequirements2(VkDevice _device,
    VK_FROM_HANDLE(tu_device, device, _device);
    VK_FROM_HANDLE(tu_image, image, pInfo->image);
 
+   const VkImagePlaneMemoryRequirementsInfo *plane_info =
+      vk_find_struct_const(pInfo->pNext, IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO);
+   if (plane_info) {
+      uint32_t plane = tu6_plane_index(image->vk.format, plane_info->planeAspect);
+      uint32_t alignment = image->layout[plane].base_align;
+      uint32_t type_count = device->physical_device->memory.non_lazy_type_count;
+      pMemoryRequirements->memoryRequirements = (VkMemoryRequirements) {
+         .size = align64(image->layout[plane].size, alignment),
+         .alignment = alignment,
+         .memoryTypeBits = (1u << type_count) - 1,
+      };
+      return;
+   }
+
    tu_get_image_memory_requirements(device, image, pMemoryRequirements);
 }
 
@@ -1499,7 +1579,19 @@ tu_get_image_subresource_layout(struct tu_image *image,
        * passed as an offset within the FD for the image contents -- the
        * position of the rest of the image data including uncompressed
        * contents is implied from the format modifier. */
-      pLayout->subresourceLayout.offset = 0;
+      /* For plane 0 / COLOR, UBWC starts at offset 0.  For non-primary
+       * planes in a multi-plane image, use fdl_ubwc_offset which includes
+       * the accumulated base from plane stitching. */
+      VkImageAspectFlags a = pSubresource->imageSubresource.aspectMask;
+      if (a == VK_IMAGE_ASPECT_COLOR_BIT ||
+          a == VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT ||
+          a == VK_IMAGE_ASPECT_PLANE_0_BIT) {
+         pLayout->subresourceLayout.offset = 0;
+      } else {
+         pLayout->subresourceLayout.offset =
+            fdl_ubwc_offset(layout, pSubresource->imageSubresource.mipLevel,
+                            pSubresource->imageSubresource.arrayLayer);
+      }
       /* UBWC scanout won't match what the kernel wants if we have levels/layers */
       assert(image->vk.mip_levels == 1 && image->vk.array_layers == 1);
    }
@@ -1616,6 +1708,26 @@ tu_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
    } else {
       memset(pData, 0, sizeof(image->iova));
    }
+   return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_GetImageOpaqueCaptureDataEXT(VkDevice device, uint32_t imageCount, const VkImage *pImages,
+                                VkHostAddressRangeEXT *pDatas)
+{
+   for (uint32_t i = 0; i < imageCount; i++) {
+      VK_FROM_HANDLE(tu_image, image, pImages[i]);
+
+      if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+         /* Save the image iova so that when replaying sparse images have a
+          * consistent iova and therefore consistent descriptor contents.
+          */
+         memcpy(pDatas[i].address, &image->iova, sizeof(image->iova));
+      } else {
+         memset(pDatas[i].address, 0, sizeof(image->iova));
+      }
+   }
+
    return VK_SUCCESS;
 }
 

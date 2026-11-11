@@ -3733,11 +3733,7 @@ visit_alu(struct lp_build_nir_soa_context *bld,
    }
 
    LLVMValueRef result[NIR_MAX_VEC_COMPONENTS];
-   if (instr->op == nir_op_vec4 ||
-       instr->op == nir_op_vec3 ||
-       instr->op == nir_op_vec2 ||
-       instr->op == nir_op_vec8 ||
-       instr->op == nir_op_vec16) {
+   if (nir_op_is_vec(instr->op)) {
       for (unsigned i = 0; i < nir_op_infos[instr->op].num_inputs; i++) {
          result[i] = cast_type(bld, src[i],
                                nir_alu_type_get_base_type(nir_op_infos[instr->op].input_types[i]),

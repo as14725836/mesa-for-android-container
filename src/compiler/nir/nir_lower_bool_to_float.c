@@ -53,18 +53,6 @@ lower_alu_instr(nir_builder *b, nir_alu_instr *alu, bool has_fcsel_ne,
    /* Replacement SSA value */
    nir_def *rep = NULL;
    switch (alu->op) {
-   case nir_op_mov:
-   case nir_op_vec2:
-   case nir_op_vec3:
-   case nir_op_vec4:
-   case nir_op_vec5:
-   case nir_op_vec8:
-   case nir_op_vec16:
-      if (alu->def.bit_size != 1)
-         return false;
-      /* These we expect to have booleans but the opcode doesn't change */
-      break;
-
    case nir_op_b2f32:
       alu->op = nir_op_mov;
       break;
@@ -153,6 +141,13 @@ lower_alu_instr(nir_builder *b, nir_alu_instr *alu, bool has_fcsel_ne,
       break;
 
    default:
+      if (nir_op_is_vec_or_mov(alu->op)) {
+         if (alu->def.bit_size != 1)
+            return false;
+         /* These we expect to have booleans but the opcode doesn't change */
+         break;
+      }
+
       assert(alu->def.bit_size > 1);
       for (unsigned i = 0; i < op_info->num_inputs; i++)
          assert(alu->src[i].src.ssa->bit_size > 1);

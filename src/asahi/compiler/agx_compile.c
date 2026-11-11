@@ -2151,10 +2151,6 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       return agx_emit_collect_to(b, dst, srcs, idx);
    }
 
-   case nir_op_vec8:
-   case nir_op_vec16:
-      UNREACHABLE("should've been lowered");
-
    default:
       fprintf(stderr, "Unhandled ALU op %s\n", nir_op_infos[instr->op].name);
       UNREACHABLE("Unhandled ALU instruction");

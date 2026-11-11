@@ -5821,15 +5821,11 @@ default_varying_estimate_instr_cost(nir_instr *instr)
       alu_op = nir_instr_as_alu(instr)->op;
       num_dst_dwords = DIV_ROUND_UP(dst_bit_size, 32);
 
-      switch (alu_op) {
       /* Moves are free. */
-      case nir_op_mov:
-      case nir_op_vec2:
-      case nir_op_vec3:
-      case nir_op_vec4:
-      case nir_op_vec5:
-      case nir_op_vec8:
-      case nir_op_vec16:
+      if (nir_op_is_vec_or_mov(alu_op))
+         return 0;
+
+      switch (alu_op) {
       /* These are usually folded into FP instructions as src or dst
        * modifiers.
        */

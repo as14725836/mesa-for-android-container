@@ -459,6 +459,8 @@ st_bind_egl_image(struct gl_context *ctx,
    GLenum internalFormat;
    mesa_format texFormat;
 
+   const bool native_packed_422 = st->screen->caps.native_packed_422;
+
    if (stimg->texture->target != gl_target_to_pipe(texObj->Target)) {
       _mesa_error(ctx, GL_INVALID_OPERATION, __func__);
       return;
@@ -613,6 +615,14 @@ st_bind_egl_image(struct gl_context *ctx,
             texObj->RequiredTextureImageUnits = 1;
          } else if (stimg->texture->format == PIPE_FORMAT_B8R8_G8R8_UNORM) {
             texFormat = MESA_FORMAT_BR_GR_UNORM8;
+            texObj->RequiredTextureImageUnits = 1;
+         } else if (native_packed_422 && stimg->format == PIPE_FORMAT_YUYV) {
+            /* A driver with native_packed_422 samples the natively-stored
+             * YUYV image as a single 422 texture rather than through the
+             * 2-unit alias-view scheme below (which Vulkan does not permit
+             * for this format on zink).
+             */
+            texFormat = MESA_FORMAT_RG_RB_UNORM8;
             texObj->RequiredTextureImageUnits = 1;
          } else {
             texFormat = MESA_FORMAT_RG_UNORM8;

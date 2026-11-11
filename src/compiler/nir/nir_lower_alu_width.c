@@ -223,23 +223,30 @@ lower_alu_instr_width(nir_builder *b, nir_instr *instr, void *_data)
    case name##2:                           \
    case name##3:                           \
    case name##4:                           \
+   case name##5:                           \
+   case name##6:                           \
+   case name##7:                           \
    case name##8:                           \
+   case name##9:                           \
+   case name##10:                          \
+   case name##11:                          \
+   case name##12:                          \
+   case name##13:                          \
+   case name##14:                          \
+   case name##15:                          \
    case name##16:                          \
       return lower_reduction(alu, chan, merge, b, true);
 
+   /* We don't need to scalarize these ops, they're the ones generated to
+    * group up outputs into a value that can be SSAed.
+    */
+   if (nir_op_is_vec(alu->op))
+      return NULL;
+
    switch (alu->op) {
-   case nir_op_vec16:
-   case nir_op_vec8:
-   case nir_op_vec5:
-   case nir_op_vec4:
-   case nir_op_vec3:
-   case nir_op_vec2:
    case nir_op_cube_amd:
    case nir_op_uadd_with_carry_out:
    case nir_op_usub_with_borrow_out:
-      /* We don't need to scalarize these ops, they're the ones generated to
-       * group up outputs into a value that can be SSAed.
-       */
       return NULL;
 
    case nir_op_pack_half_2x16: {
@@ -364,13 +371,33 @@ lower_alu_instr_width(nir_builder *b, nir_instr *instr, void *_data)
    case nir_op_fdot2:
    case nir_op_fdot3:
    case nir_op_fdot4:
+   case nir_op_fdot5:
+   case nir_op_fdot6:
+   case nir_op_fdot7:
    case nir_op_fdot8:
+   case nir_op_fdot9:
+   case nir_op_fdot10:
+   case nir_op_fdot11:
+   case nir_op_fdot12:
+   case nir_op_fdot13:
+   case nir_op_fdot14:
+   case nir_op_fdot15:
    case nir_op_fdot16:
       return lower_fdot(alu, b, false);
    case nir_op_bfdot2:
    case nir_op_bfdot3:
    case nir_op_bfdot4:
+   case nir_op_bfdot5:
+   case nir_op_bfdot6:
+   case nir_op_bfdot7:
    case nir_op_bfdot8:
+   case nir_op_bfdot9:
+   case nir_op_bfdot10:
+   case nir_op_bfdot11:
+   case nir_op_bfdot12:
+   case nir_op_bfdot13:
+   case nir_op_bfdot14:
+   case nir_op_bfdot15:
    case nir_op_bfdot16:
       if (b->shader->options->has_bfdot2_bfadd)
          return lower_bfdot_to_bfdot2_bfadd(b, alu);

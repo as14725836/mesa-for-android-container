@@ -460,6 +460,17 @@ zink_resource_image_barrier(struct zink_context *ctx, struct zink_resource *res,
 
    res->layout = new_layout;
 
+   /* For non-DISJOINT multi-plane YUV (e.g. NV12): a COLOR-aspect barrier
+    * covers all planes. Propagate the new layout to the UV sibling so it
+    * won't emit a redundant barrier with a stale oldLayout (which is UB).
+    */
+   if (res->aspect == VK_IMAGE_ASPECT_COLOR_BIT && res->base.b.next) {
+      struct zink_resource *next = zink_resource(res->base.b.next);
+      if (next && next->obj == res->obj) {
+         next->layout = new_layout;
+      }
+   }
+
    if (is_write)
       res->obj->last_write = flags;
    if (GENERAL) {

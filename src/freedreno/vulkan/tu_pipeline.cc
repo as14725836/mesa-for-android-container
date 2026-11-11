@@ -20,6 +20,7 @@
 #include "vk_pipeline.h"
 #include "vk_render_pass.h"
 #include "vk_util.h"
+#include "vk_nir_lower_descriptor_heaps.h"
 
 #include "common/freedreno_guardband.h"
 #include "ir3/ir3_nir.h"
@@ -27,6 +28,7 @@
 #include "tu_cs.h"
 #include "tu_device.h"
 #include "tu_formats.h"
+#include "tu_image.h"
 #include "tu_knl.h"
 #include "tu_lrz.h"
 #include "tu_pass.h"
@@ -65,6 +67,9 @@ static unsigned
 tu6_load_state_size(struct tu_pipeline *pipeline,
                     struct tu_pipeline_layout *layout)
 {
+   if (!layout)
+      return 0;
+
    const unsigned load_state_size = 4;
    unsigned size = 0;
    for (unsigned i = 0; i < layout->num_sets; i++) {
@@ -328,16 +333,16 @@ tu_blend_state_is_dual_src(const struct vk_color_blend_state *cb)
 }
 
 enum ir3_push_consts_type
-tu_push_consts_type(const struct tu_pipeline_layout *layout,
+tu_push_consts_type(const struct tu_push_constant_range *range,
                     const struct ir3_compiler *compiler)
 {
-   if (!layout->push_constant_size)
+   if (!range->dwords)
       return IR3_PUSH_CONSTS_NONE;
 
    if (TU_DEBUG(PUSH_CONSTS_PER_STAGE))
       return IR3_PUSH_CONSTS_PER_STAGE;
 
-   if (tu6_shared_constants_enable(layout, compiler)) {
+   if (tu6_shared_constants_enable(range, compiler)) {
       return IR3_PUSH_CONSTS_SHARED;
    } else {
       if (compiler->gen >= 7) {
@@ -1828,6 +1833,8 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
          tu_shader_key_robustness(&keys[stage], &rs);
          if (builder->create_flags & VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT_KHR)
             keys[stage].lower_view_index_to_device_index = true;
+         if (builder->create_flags & VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT)
+            keys[stage].descriptor_heap = true;
       }
    }
 
@@ -2298,8 +2305,6 @@ tu_pipeline_builder_parse_layout(struct tu_pipeline_builder *builder,
          for (unsigned j = 0; j < library->num_sets; j++) {
             builder->layout.set[j].layout = library->layouts[j];
          }
-
-         builder->layout.push_constant_size = library->push_constant_size;
       }
 
       tu_pipeline_layout_init(&builder->layout);
@@ -2314,7 +2319,6 @@ tu_pipeline_builder_parse_layout(struct tu_pipeline_builder *builder,
          if (library->layouts[i])
             vk_descriptor_set_layout_ref(&library->layouts[i]->vk);
       }
-      library->push_constant_size = builder->layout.push_constant_size;
    }
 }
 
@@ -2386,7 +2390,19 @@ tu_emit_program_state(struct tu_cs *sub_cs,
          &shaders[i]->const_state.push_consts;
       if (push_consts->type == IR3_PUSH_CONSTS_SHARED ||
           push_consts->type == IR3_PUSH_CONSTS_SHARED_PREAMBLE) {
-         prog->shared_consts = *push_consts;
+         if (prog->shared_consts.dwords != 0) {
+            /* Combine the ranges. */
+            unsigned lo = MIN2(prog->shared_consts.lo_dwords,
+                               push_consts->lo_dwords);
+            unsigned dwords =
+               MAX2(prog->shared_consts.lo_dwords +
+                    prog->shared_consts.dwords,
+                    push_consts->lo_dwords + push_consts->dwords) - lo;
+            prog->shared_consts.lo_dwords = lo;
+            prog->shared_consts.dwords = dwords;
+         } else {
+            prog->shared_consts = *push_consts;
+         }
       }
 
       if (variants[i]->info.uses_ray_intersection)
@@ -3329,7 +3345,15 @@ tu6_blend_size(struct tu_device *dev,
 {
    unsigned num_rts = alpha_to_coverage_enable ?
       MAX2(cb->attachment_count, 1) : cb->attachment_count;
-   return 8 + (CHIP >= A8XX ? 2 : 0) + 5 * num_rts;
+   unsigned extra = 0;
+   for (unsigned i = 0; i < num_rts; i++) {
+      if (cal->color_map[i] != MESA_VK_ATTACHMENT_UNUSED &&
+          tu6_format_is_yuv_render_target(rp->color_attachment_formats[i])) {
+         extra = 10;
+         break;
+      }
+   }
+   return 8 + (CHIP >= A8XX ? 2 : 0) + 5 * num_rts + extra;
 }
 
 template <chip CHIP>
@@ -3458,6 +3482,31 @@ tu6_emit_blend(struct tu_cs *cs,
          }
       }
    }
+
+   /* GL_EXT_YUV_target NV12 render: tu6_emit_mrt adds a UV-plane MRT at
+    * (remapped + 1). Enable component writes on it and widen OUTPUT_MASK so
+    * the HW writes the driver-inserted UV MRT (the OUTPUT_REG duplication
+    * itself is done in tu6_emit_mrt).
+    */
+   for (unsigned i = 0; i < num_rts; i++) {
+      if (cal->color_map[i] == MESA_VK_ATTACHMENT_UNUSED)
+         continue;
+      if (tu6_format_is_yuv_render_target(rp->color_attachment_formats[i])) {
+         unsigned remapped_idx = cal->color_map[i];
+         unsigned uv_idx = remapped_idx + 1;
+         tu_cs_emit_regs(cs,
+                         A6XX_RB_MRT_CONTROL(uv_idx, .component_enable = 0xf),
+                         A6XX_RB_MRT_BLEND_CONTROL(uv_idx,));
+         if (CHIP >= A8XX) {
+            tu_cs_emit_regs(cs, SP_MRT_BLEND_CNTL_REG(CHIP, uv_idx,
+               .component_write_mask = 0xf));
+         }
+         tu_cs_emit_regs(cs, A6XX_SP_PS_OUTPUT_MASK(.dword = 0xff));
+         tu_cs_emit_regs(cs, A6XX_RB_PS_OUTPUT_MASK(.dword = 0xff));
+         break;
+      }
+   }
+
    tu_cs_emit_regs(cs, A6XX_SP_PS_MRT_CNTL(.mrt = num_remapped_rts));
    tu_cs_emit_regs(cs, A6XX_RB_PS_MRT_CNTL(.mrt = num_remapped_rts));
    if (CHIP >= A8XX)
@@ -5040,6 +5089,7 @@ tu_compute_pipeline_create(VkDevice device,
    tu_shader_key_subgroup_size(&key, allow_varying_subgroup_size,
                                require_full_subgroups, subgroup_info,
                                dev);
+   key.descriptor_heap = flags & VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
 
    struct vk_pipeline_robustness_state rs;
    vk_pipeline_robustness_state_fill(&dev->vk.robustness_state, &rs, pCreateInfo->pNext, stage_info->pNext);
@@ -5078,18 +5128,21 @@ tu_compute_pipeline_create(VkDevice device,
       }
 
       struct ir3_shader_key ir3_key = {};
+      struct vk_sampler_state_array embedded_samplers = {};
 
       nir_shader *nir = tu_spirv_to_nir(dev, pipeline_mem_ctx, flags,
-                                        stage_info, &key, MESA_SHADER_COMPUTE);
+                                        stage_info, &key, &embedded_samplers,
+                                        MESA_SHADER_COMPUTE);
 
       nir_initial_disasm = executable_info ?
          nir_shader_as_str(nir, pipeline->base.executables_mem_ctx) : NULL;
 
       struct tu_shader_info info = {};
       tu_lower_nir(dev, nir, &key, &ir3_key, &info);
-      result = tu_shader_create(dev, &shader, nir, &key, &info, &ir3_key,
+      result = tu_shader_create(dev, &shader, nir, &embedded_samplers, &key, &info, &ir3_key,
                                 pipeline_blake3, sizeof(pipeline_blake3), layout,
                                 executable_info);
+      vk_sampler_state_array_finish(&embedded_samplers);
       if (!shader) {
          goto fail;
       }

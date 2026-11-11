@@ -176,6 +176,8 @@ st_get_sampler_views(struct st_context *st,
     * case is video playback (ie. fps games wouldn't be using this) so I
     * guess no point to try to optimize this feature.
     */
+   const bool native_packed_422 = st->screen->caps.native_packed_422;
+
    while (unlikely(external_samplers_used)) {
       GLuint unit = u_bit_scan(&external_samplers_used);
       GLuint extra = 0;
@@ -299,6 +301,17 @@ st_get_sampler_views(struct st_context *st,
          if (stObj->pt->format == PIPE_FORMAT_R8G8_R8B8_UNORM ||
              stObj->pt->format == PIPE_FORMAT_R8B8_R8G8_UNORM)
             /* no additional views needed */
+            break;
+
+         /* A driver with native_packed_422 samples the natively-stored 422
+          * image through a single native descriptor and pairs with the
+          * single-plane lowering (see st_get_external_sampler_key()). On
+          * zink, Vulkan forbids reinterpreting a 422 image as a
+          * class-incompatible RGBA format
+          * (VUID-VkImageViewCreateInfo-image-01761), so creating the alias
+          * view below would fail and leave a dead descriptor behind.
+          */
+         if (native_packed_422)
             break;
 
          /* we need one additional B8G8R8A8 view of the chroma samples: */

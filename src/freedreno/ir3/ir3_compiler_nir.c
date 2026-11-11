@@ -596,9 +596,7 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
     * and just take the first swizzle channel for each argument in
     * order into each writemask channel.
     */
-   if ((alu->op == nir_op_vec2) || (alu->op == nir_op_vec3) ||
-       (alu->op == nir_op_vec4) || (alu->op == nir_op_vec8) ||
-       (alu->op == nir_op_vec16)) {
+   if (nir_op_is_vec(alu->op)) {
       for (int i = 0; i < info->num_inputs; i++) {
          nir_alu_src *asrc = &alu->src[i];
          struct ir3_instruction *src =
@@ -2932,6 +2930,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
       ctx->funcs->emit_intrinsic_store_global(ctx, intr);
       break;
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_constant:
    case nir_intrinsic_load_global_offset:
       ctx->funcs->emit_intrinsic_load_global(ctx, intr, dst);
       break;

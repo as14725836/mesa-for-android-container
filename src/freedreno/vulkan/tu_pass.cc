@@ -815,11 +815,18 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
                att_gmem_alloc[i * 2 + 1] =
                   tu_gmem_alloc(gmem_alloc, &num_gmem_alloc, att->samples,
                               att->first_subpass_idx, att->last_subpass_idx);
+            } else if (tu6_format_is_yuv_render_target(att->format)) {
+               /* NV12 chroma plane: a second GMEM region with the Y plane's
+                * cpp, reusing the stencil slot (NV12 and D32S8 are exclusive).
+                */
+               att_gmem_alloc[i * 2 + 1] =
+                  tu_gmem_alloc(gmem_alloc, &num_gmem_alloc, att->cpp,
+                              att->first_subpass_idx, att->last_subpass_idx);
             }
 
             /* texture pitch must be aligned to 64, use a tile_align_w that is
              * a multiple of 64 for cpp==1 attachment to work as input
-             * attachment
+             * attachment.  NV12's UV plane (cpp==1) relies on the same bump.
              */
             if (cpp1 && tile_align_w % 64 != 0) {
                tile_align_w *= 2;
@@ -895,6 +902,8 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
          att->gmem_offset[layout] = att_gmem_alloc[2 * i]->gmem_offset;
          if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
             att->gmem_offset_stencil[layout] = att_gmem_alloc[2 * i + 1]->gmem_offset;
+         else if (tu6_format_is_yuv_render_target(att->format))
+            att->gmem_offset_uv[layout] = att_gmem_alloc[2 * i + 1]->gmem_offset;
       }
    }
 out:
@@ -911,17 +920,24 @@ tu_render_pass_bandwidth_config(struct tu_render_pass *pass)
    for (uint32_t i = 0; i < pass->attachment_count; i++) {
       const struct tu_render_pass_attachment *att = &pass->attachments[i];
 
+      /* NV12 loads/stores a second (chroma) plane; att->cpp is the Y plane
+       * (1 byte), so count a rounded-up half for the UV plane.
+       */
+      uint32_t cpp = att->cpp;
+      if (tu6_format_is_yuv_render_target(att->format))
+         cpp += (att->cpp + 1) / 2;
+
       /* approximate tu_load_gmem_attachment */
       if (att->load)
-         pass->gmem_bandwidth_per_pixel += att->cpp;
+         pass->gmem_bandwidth_per_pixel += cpp;
 
       /* approximate tu_store_gmem_attachment */
       if (att->store)
-         pass->gmem_bandwidth_per_pixel += att->cpp;
+         pass->gmem_bandwidth_per_pixel += cpp;
 
       /* approximate tu_clear_sysmem_attachment */
       if (att->clear_mask)
-         pass->sysmem_bandwidth_per_pixel += att->cpp;
+         pass->sysmem_bandwidth_per_pixel += cpp;
 
       /* approximate tu6_emit_sysmem_resolves */
       if (att->will_be_resolved) {
@@ -1060,6 +1076,11 @@ tu_init_renderpass_attachment(struct tu_device *device,
     */
    if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
       att->cpp = 4 * samples;
+   else if (tu6_format_is_yuv_render_target(att->format))
+      /* NV12 occupies two GMEM regions; att->cpp / gmem_offset[] describe the
+       * Y (luma) plane (1 byte/pixel), the UV plane uses gmem_offset_uv[].
+       */
+      att->cpp = 1 * samples;
    else
       att->cpp = vk_format_get_blocksize(att->format) * samples;
    /* Initially not allocated into gmem, tu_subpass_use_attachment() will move it there. */
@@ -1442,6 +1463,8 @@ tu_setup_dynamic_attachment(struct tu_render_pass_attachment *att,
     */
    if (att->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
       att->cpp = 4 * att->samples;
+   else if (tu6_format_is_yuv_render_target(att->format))
+      att->cpp = 1 * att->samples;
    else
       att->cpp = vk_format_get_blocksize(att->format) * att->samples;
 }

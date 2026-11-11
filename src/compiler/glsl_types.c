@@ -574,17 +574,9 @@ glsl_cmat_use_to_string(enum glsl_cmat_use use)
 static const glsl_type *
 vec(unsigned components, const glsl_type *const ts[])
 {
-   unsigned n = components;
-
-   if (components == 8)
-      n = 6;
-   else if (components == 16)
-      n = 7;
-
-   if (n == 0 || n > 7)
+   if (components == 0 || components > 16)
       return &glsl_type_builtin_error;
-
-   return ts[n - 1];
+   return ts[components - 1];
 }
 
 #define VECN(components, sname, vname)           \
@@ -597,7 +589,16 @@ glsl_ ## vname ## _type (unsigned components)    \
       &glsl_type_builtin_ ## vname ## 3,         \
       &glsl_type_builtin_ ## vname ## 4,         \
       &glsl_type_builtin_ ## vname ## 5,         \
+      &glsl_type_builtin_ ## vname ## 6,         \
+      &glsl_type_builtin_ ## vname ## 7,         \
       &glsl_type_builtin_ ## vname ## 8,         \
+      &glsl_type_builtin_ ## vname ## 9,         \
+      &glsl_type_builtin_ ## vname ## 10,        \
+      &glsl_type_builtin_ ## vname ## 11,        \
+      &glsl_type_builtin_ ## vname ## 12,        \
+      &glsl_type_builtin_ ## vname ## 13,        \
+      &glsl_type_builtin_ ## vname ## 14,        \
+      &glsl_type_builtin_ ## vname ## 15,        \
       &glsl_type_builtin_ ## vname ## 16,        \
    };                                            \
    return vec(components, ts);                   \
@@ -3209,11 +3210,13 @@ encode_type_to_blob(struct blob *blob, const glsl_type *type)
    case GLSL_TYPE_YUV_CSC_STANDARD_EXT:
       encoded.basic.interface_row_major = type->interface_row_major;
       assert(type->matrix_columns < 8);
-      if (type->vector_elements <= 5)
+      if (type->vector_elements <= 4)
          encoded.basic.vector_elements = type->vector_elements;
       else if (type->vector_elements == 8)
-         encoded.basic.vector_elements = 6;
+         encoded.basic.vector_elements = 5;
       else if (type->vector_elements == 16)
+         encoded.basic.vector_elements = 6;
+      else
          encoded.basic.vector_elements = 7;
       encoded.basic.matrix_columns = type->matrix_columns;
       encoded.basic.explicit_stride = MIN2(type->explicit_stride, 0xffff);
@@ -3227,6 +3230,8 @@ encode_type_to_blob(struct blob *blob, const glsl_type *type)
          blob_write_uint32(blob, type->explicit_stride);
       if (encoded.basic.explicit_alignment == 0xf)
          blob_write_uint32(blob, type->explicit_alignment);
+      if (encoded.basic.vector_elements == 7)
+         blob_write_uint32(blob, type->vector_elements);
       return;
    case GLSL_TYPE_SAMPLER:
    case GLSL_TYPE_TEXTURE:
@@ -3335,10 +3340,12 @@ decode_type_from_blob(struct blob_reader *blob)
       else if (explicit_alignment > 0)
          explicit_alignment = 1 << (explicit_alignment - 1);
       uint32_t vector_elements = encoded.basic.vector_elements;
-      if (vector_elements == 6)
+      if (vector_elements == 5)
          vector_elements = 8;
-      else if (vector_elements == 7)
+      else if (vector_elements == 6)
          vector_elements = 16;
+      else if (vector_elements == 7)
+         vector_elements = blob_read_uint32(blob);
       return glsl_simple_explicit_type(base_type, vector_elements,
                                        encoded.basic.matrix_columns,
                                        explicit_stride,

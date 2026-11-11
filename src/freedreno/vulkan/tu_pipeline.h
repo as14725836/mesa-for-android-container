@@ -76,15 +76,15 @@ struct tu_nir_shaders
 extern const struct vk_pipeline_cache_object_ops tu_nir_shaders_ops;
 
 static bool inline
-tu6_shared_constants_enable(const struct tu_pipeline_layout *layout,
+tu6_shared_constants_enable(const struct tu_push_constant_range *range,
                             const struct ir3_compiler *compiler)
 {
-   return layout->push_constant_size > 0 &&
-          layout->push_constant_size <= (compiler->shared_consts_size * 16);
+   return range->dwords > 0 &&
+          (range->lo_dwords + range->dwords <= compiler->shared_consts_size * 4);
 }
 
 enum ir3_push_consts_type
-tu_push_consts_type(const struct tu_pipeline_layout *layout,
+tu_push_consts_type(const struct tu_push_constant_range *range,
                     const struct ir3_compiler *compiler);
 
 struct tu_program_descriptor_linkage
@@ -248,7 +248,6 @@ struct tu_graphics_lib_pipeline {
    /* Used to stitch together an overall layout for the final pipeline. */
    struct tu_descriptor_set_layout *layouts[MAX_SETS];
    unsigned num_sets;
-   unsigned push_constant_size;
    bool independent_sets;
 };
 

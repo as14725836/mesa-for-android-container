@@ -246,20 +246,13 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
 
       case nir_instr_type_alu: {
          nir_alu_instr *alu = nir_instr_as_alu(instr);
-         bool movelike = false;
+         bool movelike = nir_op_is_vec_or_mov(alu->op);
 
          switch (alu->op) {
-         case nir_op_mov:
          case nir_op_fneg:
          case nir_op_ineg:
          case nir_op_fabs:
          case nir_op_iabs:
-         case nir_op_vec2:
-         case nir_op_vec3:
-         case nir_op_vec4:
-         case nir_op_vec5:
-         case nir_op_vec8:
-         case nir_op_vec16:
             movelike = true;
             break;
 
@@ -283,7 +276,7 @@ block_check_for_allowed_instrs(nir_block *block, unsigned *count,
             break;
 
          default:
-            if (!alu_ok) {
+            if (!movelike && !alu_ok) {
                /* It must be a move-like operation. */
                return false;
             }

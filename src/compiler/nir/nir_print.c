@@ -116,9 +116,9 @@ print_annotation(print_state *state, void *obj)
 
 /* For 1 element, the size is intentionally omitted. */
 static const char *sizes[] = { "x??", "   ", "x2 ", "x3 ", "x4 ",
-                               "x5 ", "x??", "x??", "x8 ",
-                               "x??", "x??", "x??", "x??",
-                               "x??", "x??", "x??", "x16" };
+                               "x5 ", "x6 ", "x7 ", "x8 ",
+                               "x9 ", "x10", "x11", "x12",
+                               "x13", "x14", "x15", "x16" };
 
 static const char *
 divergence_status(print_state *state, bool divergent)

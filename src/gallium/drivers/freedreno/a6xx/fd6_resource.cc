@@ -308,6 +308,15 @@ layout_resource_for_handle(struct fd_resource *rsc, struct winsys_handle *handle
    struct fdl_image_params params = fd_image_params(prsc, ubwc,
 					tile_mode, handle->plane);
 
+   /* dma-buf import hands us the whole planar format per plane. Remap plane 1
+    * to R8G8_UNORM so the UV plane gets the r8g8 16x8 UBWC block instead of the
+    * generic cpp==1 block (matches the create path and turnip's layout). */
+   if ((params.format == PIPE_FORMAT_Y8_U8V8_420_UNORM ||
+        params.format == PIPE_FORMAT_R8_G8B8_420_UNORM) &&
+       handle->plane == 1) {
+      params.format = PIPE_FORMAT_R8G8_UNORM;
+   }
+
    if (!fdl6_layout_image(&rsc->layout, screen->info, &params, &l)) {
       if (FD_DBG(LAYOUT))
          mesa_loge("layout failed for: %" PRSC_FMT, PRSC_ARGS(prsc));

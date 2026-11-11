@@ -345,6 +345,15 @@ void fdl6_get_ubwc_macrotile_size(const struct fdl_layout *layout,
                                   uint32_t *macrotile_width,
                                   uint32_t *macrotile_height);
 
+static inline bool
+fdl_format_is_r8g8(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+
+   return desc->layout == UTIL_FORMAT_LAYOUT_PLAIN && desc->nr_channels == 2 &&
+          desc->channel[0].size == 8 && desc->channel[1].size == 8;
+}
+
 /* Single-sampled non-mutable R8G8 textures have a special UBWC block layout
  * that's different from the normal cpp=2 layout. Return true if this layout
  * is in use.
@@ -352,9 +361,18 @@ void fdl6_get_ubwc_macrotile_size(const struct fdl_layout *layout,
 static inline bool
 fdl6_is_r8g8_layout(const struct fdl_layout *layout)
 {
-   return layout->cpp == 2 &&
-          util_format_get_nr_components(layout->format) == 2 &&
+   return layout->cpp == 2 && fdl_format_is_r8g8(layout->format) &&
           !layout->is_mutable;
+}
+
+/* The UV plane (plane 1, R8G8) of a 2-plane NV12 image. nr_samples==1
+ * excludes D32_SFLOAT_S8_UINT's stencil plane under 2x MSAA (also
+ * plane==1, cpp==2).
+ */
+static inline bool
+fdl6_is_yuv_uv_plane(const struct fdl_layout *layout)
+{
+   return layout->plane == 1 && layout->cpp == 2 && layout->nr_samples == 1;
 }
 
 enum fdl_view_type {
@@ -372,6 +390,8 @@ enum fdl_chroma_location {
 
 struct fdl_view_args {
    uint64_t iova;
+   uint64_t plane_iova[3];
+   bool is_disjoint;
    uint32_t base_miplevel;
    uint32_t level_count;
    uint32_t base_array_layer;

@@ -77,9 +77,17 @@ enum tu_debug_flags : uint64_t
    TU_DEBUG_GMEM_WARMUP              = BITFIELD64_BIT(38),
 };
 
+#define TU_EXPERIMENTAL(name) unlikely(tu_env.experimental & TU_EXPERIMENTAL_##name)
+
+enum tu_experimental_flags : uint64_t
+{
+   TU_EXPERIMENTAL_DESCRIPTOR_HEAP = BITFIELD64_BIT(0),
+};
+
 struct tu_env {
     std::atomic<uint64_t> debug;
     uint64_t start_debug;
+    uint64_t experimental;
 };
 
 extern struct tu_env tu_env;

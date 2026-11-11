@@ -91,6 +91,7 @@
 #define MAX_DYNAMIC_BUFFERS_SIZE                                             \
    (MAX_DYNAMIC_UNIFORM_BUFFERS + 2 * MAX_DYNAMIC_STORAGE_BUFFERS) *         \
    FDL6_TEX_CONST_DWORDS
+#define TU_MAX_EMBEDDED_SAMPLERS 2048
 
 #define TU_MAX_VIS_STREAMS 4
 
@@ -148,6 +149,17 @@
  * Choose 8 as a compromise between the two.
  */
 #define TU_FDM_OFFSET_GRANULARITY 8
+
+/* Bindless base layout for descriptor heaps */
+#define TU_RESOURCE_HEAP_INDEX 0
+/* This always contains a single internal SSBO descriptor with the heap data.
+ * This lets us use the texture cache for loading resource heap data, both
+ * internally and requested by the user.
+ * TODO: This could be a UBO instead on gen8+ probably.
+ */
+#define TU_RESOURCE_HEAP_DATA_INDEX 1
+#define TU_EMBEDDED_SAMPLER_HEAP_INDEX 2
+#define TU_SAMPLER_HEAP_INDEX 3
 
 enum tu_predicate_bit {
    TU_PREDICATE_LOAD_STORE = 0,

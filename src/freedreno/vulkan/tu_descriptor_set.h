@@ -112,7 +112,6 @@ struct tu_pipeline_layout
    } set[MAX_SETS];
 
    uint32_t num_sets;
-   uint32_t push_constant_size;
 
    unsigned char blake3[BLAKE3_KEY_LEN];
 };
@@ -547,5 +546,10 @@ tu_desc_set_ubwc(uint32_t *desc, uint64_t addr)
       }
    }
 }
+
+template <chip CHIP>
+void
+tu_write_buffer_descriptor_addr(const struct tu_device *device,
+                                uint32_t *dst, uint64_t va, uint64_t range);
 
 #endif /* TU_DESCRIPTOR_SET_H */

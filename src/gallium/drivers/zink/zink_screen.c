@@ -749,6 +749,12 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->ignored_output_varyings[MESA_SHADER_TESS_EVAL] =
    caps->ignored_output_varyings[MESA_SHADER_GEOMETRY] =
    caps->ignored_output_varyings[MESA_SHADER_MESH] = 0;
+   /* Vulkan forbids viewing a 422-packed image as a format-class-incompatible
+    * RGBA format (VUID-VkImageViewCreateInfo-image-01761), so zink always
+    * samples these formats through their native single-texture descriptor
+    * instead of mesa/st's usual two-unit alias-view scheme.
+    */
+   caps->native_packed_422 = true;
 
    /* nullDescriptor is required */
    caps->null_textures = true;
@@ -1399,6 +1405,15 @@ zink_is_format_supported(struct pipe_screen *pscreen,
       return screen->info.props.limits.framebufferNoAttachmentsSampleCounts &
              vk_sample_count_flags(sample_count);
 
+   /* YUV render targets (GL_EXT_YUV_target): turnip renders these via
+    * special-cased MRT programming, and Vulkan omits COLOR_ATTACHMENT_BIT
+    * for YCbCr formats, so treat them as renderable here.  Covers multi-plane
+    * YUV (NV12) and packed 4:2:2 (YUY2/UYVY, not util_format_is_yuv()).
+    */
+   bool is_renderable_yuv =
+      (util_format_get_num_planes(format) > 1 && util_format_is_yuv(format)) ||
+      util_format_is_subsampled_422(format);
+
    if (bind & PIPE_BIND_INDEX_BUFFER) {
       if (format == PIPE_FORMAT_R8_UINT &&
           !screen->info.have_EXT_index_type_uint8)
@@ -1504,7 +1519,8 @@ zink_is_format_supported(struct pipe_screen *pscreen,
       u_foreach_bit(b, bind) {
          switch (1<<b) {
          case PIPE_BIND_RENDER_TARGET:
-            info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            if (!is_renderable_yuv)
+               info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
             break;
          case PIPE_BIND_DEPTH_STENCIL:
             info.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -1559,7 +1575,8 @@ zink_is_format_supported(struct pipe_screen *pscreen,
    } else {
       /* all other targets are texture-targets */
       if (bind & PIPE_BIND_RENDER_TARGET &&
-          !(props->optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+          !(props->optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) &&
+          !is_renderable_yuv)
          return false;
 
       if (bind & PIPE_BIND_BLENDABLE &&

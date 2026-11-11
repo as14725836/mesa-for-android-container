@@ -847,12 +847,32 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       case nir_op_fdot2:
       case nir_op_fdot3:
       case nir_op_fdot4:
+      case nir_op_fdot5:
+      case nir_op_fdot6:
+      case nir_op_fdot7:
       case nir_op_fdot8:
+      case nir_op_fdot9:
+      case nir_op_fdot10:
+      case nir_op_fdot11:
+      case nir_op_fdot12:
+      case nir_op_fdot13:
+      case nir_op_fdot14:
+      case nir_op_fdot15:
       case nir_op_fdot16:
       case nir_op_fdot2_replicated:
       case nir_op_fdot3_replicated:
       case nir_op_fdot4_replicated:
+      case nir_op_fdot5_replicated:
+      case nir_op_fdot6_replicated:
+      case nir_op_fdot7_replicated:
       case nir_op_fdot8_replicated:
+      case nir_op_fdot9_replicated:
+      case nir_op_fdot10_replicated:
+      case nir_op_fdot11_replicated:
+      case nir_op_fdot12_replicated:
+      case nir_op_fdot13_replicated:
+      case nir_op_fdot14_replicated:
+      case nir_op_fdot15_replicated:
       case nir_op_fdot16_replicated:
          push_fp_query(state, alu->src[0].src.ssa);
          return;
@@ -1265,12 +1285,32 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    case nir_op_fdot2:
    case nir_op_fdot3:
    case nir_op_fdot4:
+   case nir_op_fdot5:
+   case nir_op_fdot6:
+   case nir_op_fdot7:
    case nir_op_fdot8:
+   case nir_op_fdot9:
+   case nir_op_fdot10:
+   case nir_op_fdot11:
+   case nir_op_fdot12:
+   case nir_op_fdot13:
+   case nir_op_fdot14:
+   case nir_op_fdot15:
    case nir_op_fdot16:
    case nir_op_fdot2_replicated:
    case nir_op_fdot3_replicated:
    case nir_op_fdot4_replicated:
+   case nir_op_fdot5_replicated:
+   case nir_op_fdot6_replicated:
+   case nir_op_fdot7_replicated:
    case nir_op_fdot8_replicated:
+   case nir_op_fdot9_replicated:
+   case nir_op_fdot10_replicated:
+   case nir_op_fdot11_replicated:
+   case nir_op_fdot12_replicated:
+   case nir_op_fdot13_replicated:
+   case nir_op_fdot14_replicated:
+   case nir_op_fdot15_replicated:
    case nir_op_fdot16_replicated: {
       /* If the two sources are the same SSA value, then the result is either
        * NaN or some number >= 0.  If one source is the negation of the other,

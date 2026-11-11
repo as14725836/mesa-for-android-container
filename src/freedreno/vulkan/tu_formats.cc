@@ -166,6 +166,13 @@ tu_physical_device_get_format_properties(
    if (msrtss_out)
       msrtss_out->optimal = true;
 
+   /* MSAA rendering with these formats hangs the GPU, and Vulkan doesn't allow
+    * exposing these as single-sample-only color attachments.
+    */
+   if (format == PIPE_FORMAT_X6R10_UNORM ||
+       format == PIPE_FORMAT_X6R10X6G10_UNORM)
+      supported_color = false;
+
    if (supported_vtx)
       buffer |= VK_FORMAT_FEATURE_2_VERTEX_BUFFER_BIT;
 
@@ -197,6 +204,13 @@ tu_physical_device_get_format_properties(
          if (ycbcr_info->n_planes > 1) {
             optimal |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT |
                        VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
+            /* DISJOINT: only advertise for formats whose disjoint import
+             * path has been validated end-to-end. Currently that's NV12
+             * (covers both linear NV12 and NV12_Q08C UBWC — same format
+             * enum, modifier axis is orthogonal). Extend as other
+             * multi-plane YCbCr formats get validated. */
+            if (vk_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+               optimal |= VK_FORMAT_FEATURE_2_DISJOINT_BIT;
             if (physical_device->info->props.has_separate_chroma_filter)
                optimal |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_SEPARATE_RECONSTRUCTION_FILTER_BIT;
          }
@@ -254,6 +268,21 @@ tu_physical_device_get_format_properties(
 
       if (!vk_format_is_int(vk_format))
          optimal |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
+   }
+
+   /* Per Vulkan spec: "Formats requiring sampler YCbCr conversion must not
+    * provide COLOR_ATTACHMENT_BIT, COLOR_ATTACHMENT_BLEND_BIT,
+    * STORAGE_IMAGE_BIT, or BLIT_DST_BIT."  The HW supports rendering these
+    * (needed for GL_EXT_YUV_target via freedreno GL) but Vulkan must not
+    * advertise it.
+    */
+   if (ycbcr_info) {
+      optimal &= ~(VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
+                   VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT |
+                   VK_FORMAT_FEATURE_2_BLIT_DST_BIT |
+                   VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+                   VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+                   VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
    }
 
    /* All our depth formats support shadow comparisons. */
@@ -337,10 +366,13 @@ tu_physical_device_get_format_properties(
       optimal |= VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
 
    if (!tiling_possible(vk_format) &&
-       /* We don't actually support tiling for this format, but we need to
-        * fake it as it's required by VK_KHR_sampler_ycbcr_conversion.
+       /* We don't actually support tiling for these formats, but we need to
+        * fake it as it's required by VK_KHR_sampler_ycbcr_conversion
+        * (3-plane 420) or to expose COLOR_ATTACHMENT_BIT for
+        * GL_EXT_YUV_target rendering to packed YUYV (422) via zink/turnip.
         */
-       vk_format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) {
+       vk_format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM &&
+       vk_format != VK_FORMAT_G8B8G8R8_422_UNORM) {
       optimal = 0;
    }
 
@@ -438,6 +470,11 @@ tu_GetPhysicalDeviceFormatProperties2(
          vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out, mod_props) {
             mod_props->drmFormatModifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
             mod_props->drmFormatModifierPlaneCount = tu6_plane_count(format);
+            /* Advertise DISJOINT under QCOM_COMPRESSED: separate-BO UBWC is
+             * supported for sampling (fd6_view per-plane plane_iova) and
+             * rendering (tu6_emit_mrt's disjoint UBWC branch programs
+             * independent per-plane MRT bases without the ARRAY_PITCH delta
+             * bridge). */
             mod_props->drmFormatModifierTilingFeatures =
                pFormatProperties->formatProperties.optimalTilingFeatures;
          }
@@ -469,6 +506,7 @@ tu_GetPhysicalDeviceFormatProperties2(
          vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out, mod_props) {
             mod_props->drmFormatModifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
             mod_props->drmFormatModifierPlaneCount = tu6_plane_count(format);
+            /* See DISJOINT rationale above: separate-BO UBWC supported. */
             mod_props->drmFormatModifierTilingFeatures =
                props3->optimalTilingFeatures;
          }
@@ -550,7 +588,14 @@ tu_get_image_format_properties(
             const VkImageFormatListCreateInfo *format_list =
                vk_find_struct_const(info->pNext,
                                     IMAGE_FORMAT_LIST_CREATE_INFO);
-            if (!tu6_mutable_format_list_ubwc_compatible(physical_device->info,
+            /* Multiplane images (NV12, ycbcr) carry a format list of
+             * {full format, per-plane subformats}; that's the plane-view
+             * convention, not a reinterpretation, so skip the mutable-list
+             * UBWC compat check (which would spuriously reject it).
+             */
+            bool is_multiplane = vk_format_get_plane_count(info->format) > 1;
+            if (!is_multiplane &&
+                !tu6_mutable_format_list_ubwc_compatible(physical_device->info,
                                                          format_list))
                return VK_ERROR_FORMAT_NOT_SUPPORTED;
          }
@@ -812,6 +857,7 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkHostImageCopyDevicePerformanceQueryEXT *hic_props = NULL;
    VkImageCompressionPropertiesEXT *compression_props = NULL;
+   VkSubsampledImageFormatPropertiesEXT *subsampled_props = NULL;
    VkResult result;
 
    result = tu_get_image_format_properties(physical_device,
@@ -863,6 +909,9 @@ tu_GetPhysicalDeviceImageFormatProperties2(
          break;
       case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
          compression_props = static_cast<VkImageCompressionPropertiesEXT *>(s);
+         break;
+      case VK_STRUCTURE_TYPE_SUBSAMPLED_IMAGE_FORMAT_PROPERTIES_EXT:
+         subsampled_props = (VkSubsampledImageFormatPropertiesEXT *) s;
          break;
       default:
          break;
@@ -987,6 +1036,10 @@ tu_GetPhysicalDeviceImageFormatProperties2(
       compression_props->imageCompressionFlags = ubwc_supported ?
          VK_IMAGE_COMPRESSION_DEFAULT_EXT :
          VK_IMAGE_COMPRESSION_DISABLED_EXT;
+   }
+
+   if (subsampled_props) {
+      subsampled_props->subsampledImageDescriptorCount = 2;
    }
 
    return VK_SUCCESS;

@@ -645,17 +645,8 @@ prepare_alu_destination_and_sources(nir_to_elk_state &ntb,
     * handle it.  Other callers should not have to handle these kinds of
     * instructions.
     */
-   switch (instr->op) {
-   case nir_op_mov:
-   case nir_op_vec2:
-   case nir_op_vec3:
-   case nir_op_vec4:
-   case nir_op_vec8:
-   case nir_op_vec16:
+   if (instr->op == nir_op_mov || nir_op_is_vec(instr->op))
       return result;
-   default:
-      break;
-   }
 
    /* At this point, we have dealt with any instruction that operates on
     * more than a single channel.  Therefore, we can just adjust the source
@@ -913,7 +904,17 @@ fs_nir_emit_alu(nir_to_elk_state &ntb, nir_alu_instr *instr,
    case nir_op_vec2:
    case nir_op_vec3:
    case nir_op_vec4:
+   case nir_op_vec5:
+   case nir_op_vec6:
+   case nir_op_vec7:
    case nir_op_vec8:
+   case nir_op_vec9:
+   case nir_op_vec10:
+   case nir_op_vec11:
+   case nir_op_vec12:
+   case nir_op_vec13:
+   case nir_op_vec14:
+   case nir_op_vec15:
    case nir_op_vec16:
    case nir_op_i2f16:
    case nir_op_i2f32:
@@ -940,7 +941,17 @@ fs_nir_emit_alu(nir_to_elk_state &ntb, nir_alu_instr *instr,
    case nir_op_vec2:
    case nir_op_vec3:
    case nir_op_vec4:
+   case nir_op_vec5:
+   case nir_op_vec6:
+   case nir_op_vec7:
    case nir_op_vec8:
+   case nir_op_vec9:
+   case nir_op_vec10:
+   case nir_op_vec11:
+   case nir_op_vec12:
+   case nir_op_vec13:
+   case nir_op_vec14:
+   case nir_op_vec15:
    case nir_op_vec16: {
       elk_fs_reg temp = result;
       bool need_extra_copy = false;

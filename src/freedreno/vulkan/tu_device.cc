@@ -45,6 +45,7 @@
 #include "tu_query_pool.h"
 #include "tu_queue.h"
 #include "tu_rmv.h"
+#include "tu_sampler.h"
 #include "tu_tracepoints.h"
 #include "tu_wsi.h"
 
@@ -306,6 +307,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_shader_subgroup_rotate = true,
       .KHR_shader_subgroup_uniform_control_flow = true,
       .KHR_shader_terminate_invocation = true,
+      .KHR_shader_untyped_pointers = true,
       .KHR_spirv_1_4 = true,
       .KHR_storage_buffer_storage_class = true,
 #ifdef TU_USE_WSI_PLATFORM
@@ -339,6 +341,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_descriptor_buffer = true,
+      .EXT_descriptor_heap = TU_EXPERIMENTAL(DESCRIPTOR_HEAP),
       .EXT_descriptor_indexing = true,
       .EXT_device_address_binding_report = true,
       .EXT_device_memory_report = true,
@@ -975,6 +978,13 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VALVE_buffer_device_address_allocation_alignment */
    features->bufferDeviceAddressAllocationAlignment = true;
+
+   /* VK_KHR_shader_untyped_pointers */
+   features->shaderUntypedPointers = true;
+
+   /* VK_EXT_descriptor_heap */
+   features->descriptorHeap = true;
+   features->descriptorHeapCaptureReplay = pdevice->has_set_iova;
 }
 
 static void
@@ -1723,6 +1733,32 @@ tu_get_properties(struct tu_physical_device *pdevice,
     * larger alignments anyway.
     */
    props->maxBufferDeviceAddressAllocationAlignment = 1 << 20;
+
+   /* VK_EXT_descriptor_heap */
+   props->samplerHeapAlignment = 64;
+   props->resourceHeapAlignment = 64;
+   props->maxSamplerHeapSize = MAX_SET_SIZE;
+   /* Resource data is read with an SSBO, so limit to the SSBO max range. This
+    * is just large enough on a6xx/a7xx and plenty large enough on a8xx.
+    */
+   props->maxResourceHeapSize =
+      pdevice->info->props.max_storage_buffer_range_bytes;
+   /* We don't use reserved sampler/resource space. */
+   props->minSamplerHeapReservedRange = 0;
+   props->minSamplerHeapReservedRangeWithEmbedded = 0;
+   props->minResourceHeapReservedRange = 0;
+   props->samplerDescriptorSize = A6XX_TEX_SAMP_DWORDS * sizeof(uint32_t);
+   props->imageDescriptorSize = FDL6_TEX_CONST_DWORDS * sizeof(uint32_t);
+   props->bufferDescriptorSize = props->storageBufferDescriptorSize;
+   props->samplerDescriptorAlignment = props->samplerDescriptorSize;
+   props->imageDescriptorAlignment = 64;
+   props->bufferDescriptorAlignment = 64;
+   props->maxPushDataSize = MAX_PUSH_CONSTANTS_SIZE;
+   props->imageCaptureReplayOpaqueDataSize = sizeof(uint64_t);
+   props->maxDescriptorHeapEmbeddedSamplers = TU_MAX_EMBEDDED_SAMPLERS;
+   props->samplerYcbcrConversionCount = 1;
+   props->sparseDescriptorHeaps = true; /* sure, why not? */
+   props->protectedDescriptorHeaps = false;
 }
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {
@@ -3162,7 +3198,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    if (device->vk.enabled_features.customBorderColors)
-      global_size += TU_BORDER_COLOR_COUNT * sizeof(struct bcolor_entry);
+      global_size += TU_BORDER_COLOR_COUNT * 2 * sizeof(struct bcolor_entry);
 
    tu_bo_suballocator_init(
       &device->pipeline_suballoc, device, 128 * 1024,
@@ -3221,6 +3257,14 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS) {
       vk_startup_errorf(device->instance, result, "empty shaders");
       goto fail_empty_shaders;
+   }
+
+   if (device->vk.enabled_features.descriptorHeap) {
+      result = tu_embedded_sampler_heap_init(device);
+      if (result != VK_SUCCESS) {
+         vk_startup_errorf(device->instance, result, "embedded samplers");
+         goto fail_embedded_samplers;
+      }
    }
 
    global->predicate = 0;
@@ -3409,6 +3453,9 @@ fail_perfcntrs_pass_entries_alloc:
 fail_pipeline_cache:
    tu_destroy_dynamic_rendering(device);
 fail_dynamic_rendering:
+   if (device->vk.enabled_features.descriptorHeap)
+      tu_embedded_sampler_heap_finish(device);
+fail_embedded_samplers:
    tu_destroy_empty_shaders(device);
 fail_empty_shaders:
    if (device->null_accel_struct_bo)
@@ -3518,6 +3565,9 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    tu_bo_suballocator_finish(&device->vis_stream_suballocator);
 
    tu_bo_finish(device, device->global_bo);
+
+   if (device->vk.enabled_features.descriptorHeap)
+      tu_embedded_sampler_heap_finish(device);
 
    if (device->vm_bind_fence_fd != -1)
       close(device->vm_bind_fence_fd);
@@ -4835,4 +4885,40 @@ tu_SetDebugUtilsObjectNameEXT(
 #endif
 
    return result;
+}
+
+VKAPI_ATTR VkDeviceSize VKAPI_CALL
+tu_GetPhysicalDeviceDescriptorSizeEXT(VkPhysicalDevice physicalDevice,
+                                      VkDescriptorType descriptorType)
+{
+   VK_FROM_HANDLE(tu_physical_device, pdev, physicalDevice);
+
+   switch (descriptorType) {
+   case VK_DESCRIPTOR_TYPE_SAMPLER:
+      return pdev->vk.properties.samplerDescriptorSize;
+   case VK_DESCRIPTOR_TYPE_SAMPLE_WEIGHT_IMAGE_QCOM:
+   case VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM:
+   case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+   case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+   case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+      return pdev->vk.properties.imageDescriptorSize;
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+      /* If 8-bit accesses are not used, and isam.v is supported so that
+       * 16-bit accesses do not use a separate descriptor, we can make the
+       * storage buffer descriptor be the same size as the texel buffer
+       * descriptor, i.e. 64 bytes since we won't use the second descriptor.
+       * vkd3d-proton hits this path.
+       */
+      if (!pdev->info->props.has_isam_v ||
+          !pdev->instance->drirc.misc.enable_64byte_ssbo)
+         return pdev->vk.properties.bufferDescriptorSize;
+      FALLTHROUGH;
+   case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
+      return FDL6_TEX_CONST_DWORDS * sizeof(uint32_t);
+   default:
+      return 0;
+   }
 }

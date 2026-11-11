@@ -10,6 +10,10 @@
 #include <vulkan/vulkan_core.h>
 #include "util/mesa-blake3.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 static inline const VkDescriptorSetAndBindingMappingEXT *
 vk_descriptor_heap_mapping(const VkShaderDescriptorSetAndBindingMappingInfoEXT *info,
                            uint32_t set, uint32_t binding,
@@ -77,5 +81,9 @@ bool vk_nir_lower_descriptor_heaps(
    const VkShaderDescriptorSetAndBindingMappingInfoEXT *mapping,
    const vk_nir_lower_descriptor_heaps_options *options,
    struct vk_sampler_state_array *embedded_samplers_out);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
 
 #endif

@@ -170,10 +170,21 @@ st_get_external_sampler_key(struct st_context *st, struct gl_program *prog)
          key.lower_iyuv |= (1 << unit);
          break;
       case PIPE_FORMAT_YUYV:
-         if (stObj->pt->format == PIPE_FORMAT_R8G8_R8B8_UNORM)
+         if (stObj->pt->format == PIPE_FORMAT_R8G8_R8B8_UNORM) {
             key.lower_yu_yv |= (1 << unit);
-         else
-            key.lower_yx_xuxv |= (1 << unit);
+         } else {
+            /* Natively-stored YUYV. Which lowering applies depends on how the
+             * driver exposes the texture: a driver with native_packed_422
+             * samples the 422 image through a single native descriptor (see
+             * st_get_sampler_views(), which skips the RGBA alias view there),
+             * so the single-plane lowering applies. Other drivers get the
+             * extra BGRA8888 alias view and need the two-plane lowering.
+             */
+            if (st->screen->caps.native_packed_422)
+               key.lower_yu_yv |= (1 << unit);
+            else
+               key.lower_yx_xuxv |= (1 << unit);
+         }
          break;
       case PIPE_FORMAT_Y210:
          if (stObj->pt->format == PIPE_FORMAT_X6R10X6G10_X6R10X6B10_422_UNORM)

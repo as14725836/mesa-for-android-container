@@ -230,6 +230,9 @@ static const struct fd6_format formats[PIPE_FORMAT_COUNT] = {
    _TC(Z32_FLOAT_S8X24_UINT, 32_FLOAT,          WZYX),
    _TC(X32_S8X24_UINT,       8_UINT,            WZYX),
 
+   _TC(X6R10_UNORM,          P010_Y,            WZYX),
+   _TC(X6R10X6G10_UNORM,     P010_UV,           WZYX),
+
    /* special format for blits: */
    _TC(Z24_UNORM_S8_UINT_AS_R8G8B8A8, Z24_UNORM_S8_UINT_AS_R8G8B8A8, WZYX),
 
@@ -373,7 +376,11 @@ static const struct fd6_format formats[PIPE_FORMAT_COUNT] = {
    _T_(ASTC_12x10_FLOAT, ASTC_12x10,            WZYX),
    _T_(ASTC_12x12_FLOAT, ASTC_12x12,            WZYX),
 
-   _T_(G8B8_G8R8_UNORM, R8G8R8B8_422_UNORM,     WZYX), /* YUYV */
+   /* Renderable so that GL_EXT_YUV_target can render to a packed 422 YUV
+    * target via zink/turnip. Safe for Gallium since packed 422 YUV uses
+    * PIPE_FORMAT_YUYV there rather than G8B8_G8R8_UNORM.
+    */
+   _TC(G8B8_G8R8_UNORM, R8G8R8B8_422_UNORM,     WZYX), /* YUYV */
    _T_(B8G8_R8G8_UNORM, G8R8B8R8_422_UNORM,     WZYX), /* UYVY */
 
    /* FMT6_NV12_4R supports native texturing and rendering to YUV planar
@@ -383,9 +390,10 @@ static const struct fd6_format formats[PIPE_FORMAT_COUNT] = {
     */
    _TC(NV12, NV12_4R, WZYX),  /* YUV planar formats */
    _TC(YUYV, R8G8R8B8_422_UNORM, WZYX),
-   _T_(R8_G8B8_420_UNORM, R8_G8B8_2PLANE_420_UNORM, WZYX), /* Gallium NV12 */
-   _T_(G8_B8R8_420_UNORM, R8_G8B8_2PLANE_420_UNORM, WZYX), /* Vulkan NV12 */
+   _TC(R8_G8B8_420_UNORM, R8_G8B8_2PLANE_420_UNORM, WZYX), /* Gallium NV12, renderable: GL_EXT_YUV_target via zink/turnip */
+   _TC(G8_B8R8_420_UNORM, R8_G8B8_2PLANE_420_UNORM, WZYX), /* Vulkan NV12, renderable: GL_EXT_YUV_target via zink/turnip */
    _T_(G8_B8_R8_420_UNORM, R8_G8_B8_3PLANE_420_UNORM, WZYX),
+   _T_(X6G10_X6B10X6R10_420_UNORM,  P010,       WZYX),
 };
 /* clang-format on */
 

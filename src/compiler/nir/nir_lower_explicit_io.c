@@ -1417,7 +1417,7 @@ build_addr(nir_builder *b, nir_intrinsic_instr *intrin, nir_def *base_addr,
    nir_io_offset addr;
    unsigned max_shift = get_max_shift(intrin, b->shader->options);
 
-   if (max_shift) {
+   if (max_shift && !addr_format_is_global(addr_format, nir_var_mem_ssbo)) {
       /* In order to calculate a shifted address, we have to walk the full
        * deref chain. In that case, providing a base_addr that's not the
        * actual deref probably won't produce the desired result.
