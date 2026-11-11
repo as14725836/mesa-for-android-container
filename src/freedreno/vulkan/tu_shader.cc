@@ -4779,8 +4779,8 @@ tu_mesh_setup_create(struct tu_device *dev, struct tu_shader **shader)
    struct tu_pipeline_layout layout = {};
 
    tu_lower_nir(dev, nir, &key, &ir3_key, &info);
-   return tu_shader_create(dev, shader, nir, &key, &info, &ir3_key, NULL, 0,
-                           &layout, false);
+   return tu_shader_create(dev, shader, nir, NULL, &key, &info, &ir3_key,
+                           NULL, 0, &layout, false);
 }
 
 VkResult
